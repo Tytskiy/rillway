@@ -60,7 +60,7 @@ class _Map[T, U]:
         return self.fn(parent._get(position))
 
     def open(self, parent: Cursor[T]) -> Cursor[U]:
-        return cursors.TransformCursor(parent, map(self.fn, parent))
+        return cursors.TransformCursor(parent, map(self.fn, parent), ("map", self.name))
 
     def open_range(
         self,
@@ -69,7 +69,11 @@ class _Map[T, U]:
         stop: int,
     ) -> Cursor[U]:
         parent_cursor = parent.open_range(start, stop)
-        return cursors.TransformCursor(parent_cursor, map(self.fn, parent_cursor))
+        return cursors.TransformCursor(
+            parent_cursor,
+            map(self.fn, parent_cursor),
+            ("map", self.name),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +93,11 @@ class _Filter[T]:
         return Unknown()
 
     def open(self, parent: Cursor[T]) -> Cursor[T]:
-        return cursors.TransformCursor(parent, filter(self.predicate, parent))
+        return cursors.TransformCursor(
+            parent,
+            filter(self.predicate, parent),
+            ("filter", self.name),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +113,7 @@ class _FlatMap[T, U]:
         return Unknown()
 
     def open(self, parent: Cursor[T]) -> Cursor[U]:
-        return cursors.FlatMapCursor(parent, self.fn)
+        return cursors.FlatMapCursor(parent, self.fn, self.name)
 
 
 @dataclass(frozen=True, slots=True)

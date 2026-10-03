@@ -30,7 +30,7 @@ class PositionCursor(Cursor[int]):
         self.position += 1
         return value
 
-    def state_dict(self) -> State:
+    def _state_dict(self) -> State:
         return {"position": self.position}
 
 
@@ -125,7 +125,7 @@ class HDFSCursor(Cursor[int]):
         self.position += 1
         return value
 
-    def state_dict(self) -> State:
+    def _state_dict(self) -> State:
         return {
             "path": self.path,
             "version": self.version,

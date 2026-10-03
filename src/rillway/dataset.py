@@ -114,7 +114,8 @@ class Dataset[T](ABC):
     ) -> Dataset[U]:
         """Build a checkpointable dataset from fresh stateful cursors.
 
-        The cursor owns restoration of state previously returned by it.
+        The cursor implements ``_state_dict`` and ``_load_state_dict`` for its
+        local payload; the public methods add and validate checkpoint metadata.
         """
         if not callable(factory):
             raise TypeError("factory must be callable")
