@@ -69,6 +69,15 @@ You can inspect a pipeline without running it:
 print(dataset.map(str).filter(str.isdigit).explain())
 ```
 
+Independent work can run concurrently with `parallel_map`. Results stay in
+input order, and the amount of work waiting in memory is bounded.
+
+```python
+dataset = numbers.parallel_map(read_and_decode, workers=8)
+```
+
+Parallel mapping currently uses threads and is not checkpointable.
+
 ## Resuming work
 
 Some datasets can save their current position and continue with a new cursor.
@@ -95,6 +104,7 @@ checkpoint when the pipeline does not match.
 ## Available operations
 
 - `map`
+- `parallel_map`
 - `filter`
 - `flat_map`
 - `take` and `skip`

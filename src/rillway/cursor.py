@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, ExitStack
 from operator import index as to_index
 from types import TracebackType
@@ -240,6 +242,47 @@ class TransformCursor[T, U](_ParentCursor[T, U]):
 
     def _next(self) -> U:
         return next(self._iterator)
+
+
+class ParallelMapCursor[T, U](Cursor[U]):
+    def __init__(
+        self,
+        parent: Cursor[T],
+        fn: Callable[[T], U],
+        workers: int,
+        buffer_size: int,
+    ):
+        super().__init__()
+        self._parent = self.enter_context(parent)
+        self._fn = fn
+        self._capacity = workers + buffer_size
+        self._pending: deque[Future[U]] = deque()
+        self._parent_done = False
+        self._executor = ThreadPoolExecutor(max_workers=workers)
+        self.callback(self._executor.shutdown, wait=True, cancel_futures=True)
+
+    def _fill(self) -> None:
+        while not self._parent_done and len(self._pending) < self._capacity:
+            try:
+                value = next(self._parent)
+            except StopIteration:
+                self._parent_done = True
+            except Exception as error:
+                self._parent_done = True
+                failure: Future[U] = Future()
+                failure.set_exception(error)
+                self._pending.append(failure)
+            else:
+                self._pending.append(self._executor.submit(self._fn, value))
+
+    def _next(self) -> U:
+        self._fill()
+        if not self._pending:
+            raise StopIteration
+        pending = self._pending.popleft()
+        value = pending.result()
+        self._fill()
+        return value
 
 
 class _CloseSlot:

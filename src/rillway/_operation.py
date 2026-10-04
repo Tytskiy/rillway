@@ -77,6 +77,32 @@ class _Map[T, U]:
 
 
 @dataclass(frozen=True, slots=True)
+class _ParallelMap[T, U]:
+    fn: Callable[[T], U]
+    name: str
+    workers: int
+    buffer_size: int
+
+    @property
+    def description(self) -> str:
+        return (
+            f"ParallelMap(name={self.name!r}, workers={self.workers}, "
+            f"buffer_size={self.buffer_size})"
+        )
+
+    def cardinality(self, parent: Cardinality) -> Cardinality:
+        return parent
+
+    def open(self, parent: Cursor[T]) -> Cursor[U]:
+        return cursors.ParallelMapCursor(
+            parent,
+            self.fn,
+            self.workers,
+            self.buffer_size,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _Filter[T]:
     predicate: Callable[[T], bool]
     name: str

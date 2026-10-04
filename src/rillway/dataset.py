@@ -23,6 +23,7 @@ from ._operation import (
     _FlatMap,
     _Map,
     _Operation,
+    _ParallelMap,
     _Skip,
     _StreamOperation,
     _Take,
@@ -65,6 +66,35 @@ class Dataset[T](ABC):
 
     def map[U](self, fn: Callable[[T], U], *, name: str | None = None) -> Dataset[U]:
         return _UnaryDataset(self, _Map(fn, _callable_name(fn, name)))
+
+    def parallel_map[U](
+        self,
+        fn: Callable[[T], U],
+        *,
+        workers: int,
+        buffer_size: int | None = None,
+        name: str | None = None,
+    ) -> Dataset[U]:
+        """Apply ``fn`` in worker threads and yield results in input order.
+
+        ``buffer_size`` controls how many calls may wait beyond the active
+        workers. It defaults to the worker count.
+        """
+        workers = _positive("workers", workers)
+        buffer_size = (
+            workers
+            if buffer_size is None
+            else _nonnegative("buffer_size", buffer_size)
+        )
+        return _ParallelMapDataset(
+            self,
+            _ParallelMap(
+                fn,
+                _callable_name(fn, name),
+                workers,
+                buffer_size,
+            ),
+        )
 
     def filter(self, predicate: Callable[[T], bool], *, name: str | None = None) -> Dataset[T]:
         return _UnaryDataset(self, _Filter(predicate, _callable_name(predicate, name)))
@@ -489,6 +519,19 @@ class _UnaryDataset[T, U](_UnaryNode[T], Dataset[U]):
 
     parent: Dataset[T]
     operation: _StreamOperation[T, U]
+
+    @property
+    def cardinality(self) -> Cardinality:
+        return self.operation.cardinality(self.parent.cardinality)
+
+    def cursor(self) -> Cursor[U]:
+        return self.operation.open(self.parent.cursor())
+
+
+@dataclass(frozen=True, slots=True)
+class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
+    parent: Dataset[T]
+    operation: _ParallelMap[T, U]
 
     @property
     def cardinality(self) -> Cardinality:

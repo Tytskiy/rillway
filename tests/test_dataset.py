@@ -1,3 +1,5 @@
+from threading import Event, Lock
+
 import pytest
 
 from rillway import (
@@ -122,6 +124,34 @@ def test_filter_loses_indexing_but_map_preserves_it():
     with pytest.raises(TypeError):
         len(streamed)
     assert not hasattr(streamed, "__getitem__")
+
+
+def test_parallel_map_runs_concurrently_and_preserves_input_order():
+    second_finished = Event()
+    completed = []
+    lock = Lock()
+
+    def transform(value):
+        if value == 0:
+            assert second_finished.wait(2)
+        with lock:
+            completed.append(value)
+        if value == 1:
+            second_finished.set()
+        return value * 10
+
+    dataset = IndexedDataset.from_source(range(3)).parallel_map(
+        transform,
+        workers=2,
+        buffer_size=0,
+    )
+
+    assert isinstance(dataset, Dataset)
+    assert not isinstance(dataset, RangeDataset)
+    assert dataset.cardinality == Exact(3)
+    assert list(dataset) == [0, 10, 20]
+    assert completed[:2] == [1, 0]
+    assert "workers=2, buffer_size=0" in dataset.explain()
 
 
 def test_plan_is_inspectable():
@@ -296,3 +326,15 @@ def test_structural_operations_validate_counts(method, value):
         getattr(indexed, method)(value)
     with pytest.raises(ValueError):
         getattr(stream, method)(value)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"workers": 0},
+        {"workers": 1, "buffer_size": -1},
+    ],
+)
+def test_parallel_map_validates_limits(options):
+    with pytest.raises(ValueError):
+        IndexedDataset.from_source([1]).parallel_map(str, **options)
