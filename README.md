@@ -1,5 +1,7 @@
 # Rillway
 
+[![CI](https://github.com/Tytskiy/rillway/actions/workflows/ci.yml/badge.svg)](https://github.com/Tytskiy/rillway/actions/workflows/ci.yml)
+
 Rillway is a small Python library for building lazy, reusable data pipelines.
 It keeps the familiar feel of Python iterators while making it easy to replay a
 pipeline, split up a dataset, and resume interrupted work.
@@ -21,6 +23,14 @@ assert list(dataset) == [(0, 6), (12, 18)]
 ```
 
 Rillway requires Python 3.12 or newer.
+
+## Installation
+
+Rillway is not published on PyPI. Install it directly from GitHub:
+
+```shell
+uv add "rillway @ git+https://github.com/Tytskiy/rillway.git"
+```
 
 ## The basic idea
 
