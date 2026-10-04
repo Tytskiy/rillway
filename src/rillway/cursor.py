@@ -3,8 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import AbstractContextManager, ExitStack
+from multiprocessing import get_context
 from operator import index as to_index
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
@@ -251,6 +252,7 @@ class ParallelMapCursor[T, U](Cursor[U]):
         fn: Callable[[T], U],
         workers: int,
         buffer_size: int,
+        backend: str,
     ):
         super().__init__()
         self._parent = self.enter_context(parent)
@@ -258,7 +260,16 @@ class ParallelMapCursor[T, U](Cursor[U]):
         self._capacity = workers + buffer_size
         self._pending: deque[Future[U]] = deque()
         self._parent_done = False
-        self._executor = ThreadPoolExecutor(max_workers=workers)
+        self._executor: Executor
+        if backend == "thread":
+            self._executor = ThreadPoolExecutor(max_workers=workers)
+        elif backend == "process":
+            self._executor = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=get_context("spawn"),
+            )
+        else:
+            raise ValueError(f"unsupported parallel backend: {backend!r}")
         self.callback(self._executor.shutdown, wait=True, cancel_futures=True)
 
     def _fill(self) -> None:

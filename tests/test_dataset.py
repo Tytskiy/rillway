@@ -1,3 +1,4 @@
+import os
 from threading import Event, Lock
 
 import pytest
@@ -10,6 +11,10 @@ from rillway import (
     IndexedSource,
     RangeDataset,
 )
+
+
+def worker_process_id(value):
+    return os.getpid(), value
 
 
 def test_exact_is_a_nonnegative_int():
@@ -152,6 +157,21 @@ def test_parallel_map_runs_concurrently_and_preserves_input_order():
     assert list(dataset) == [0, 10, 20]
     assert completed[:2] == [1, 0]
     assert "workers=2, buffer_size=0" in dataset.explain()
+
+
+def test_parallel_map_can_use_process_workers():
+    parent_process = os.getpid()
+    dataset = IndexedDataset.from_source(range(3)).parallel_map(
+        worker_process_id,
+        workers=2,
+        buffer_size=0,
+        backend="process",
+    )
+
+    results = list(dataset)
+
+    assert [value for _, value in results] == [0, 1, 2]
+    assert all(process != parent_process for process, _ in results)
 
 
 def test_plan_is_inspectable():
@@ -333,6 +353,7 @@ def test_structural_operations_validate_counts(method, value):
     [
         {"workers": 0},
         {"workers": 1, "buffer_size": -1},
+        {"workers": 1, "backend": "invalid"},
     ],
 )
 def test_parallel_map_validates_limits(options):

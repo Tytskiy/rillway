@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import accumulate
 from operator import index as to_index
-from typing import Any, ClassVar, Protocol, cast, overload, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, cast, overload, runtime_checkable
 
 from . import cursor as cursors
 from ._operation import (
@@ -73,14 +73,18 @@ class Dataset[T](ABC):
         *,
         workers: int,
         buffer_size: int | None = None,
+        backend: Literal["thread", "process"] = "thread",
         name: str | None = None,
     ) -> Dataset[U]:
-        """Apply ``fn`` in worker threads and yield results in input order.
+        """Apply ``fn`` concurrently and yield results in input order.
 
         ``buffer_size`` controls how many calls may wait beyond the active
-        workers. It defaults to the worker count.
+        workers. It defaults to the worker count. Process workers require the
+        function, inputs, and outputs to be picklable.
         """
         workers = _positive("workers", workers)
+        if backend not in ("thread", "process"):
+            raise ValueError(f"unsupported parallel backend: {backend!r}")
         buffer_size = (
             workers
             if buffer_size is None
@@ -93,6 +97,7 @@ class Dataset[T](ABC):
                 _callable_name(fn, name),
                 workers,
                 buffer_size,
+                backend,
             ),
         )
 

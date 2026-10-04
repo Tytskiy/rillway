@@ -82,12 +82,13 @@ class _ParallelMap[T, U]:
     name: str
     workers: int
     buffer_size: int
+    backend: str
 
     @property
     def description(self) -> str:
         return (
             f"ParallelMap(name={self.name!r}, workers={self.workers}, "
-            f"buffer_size={self.buffer_size})"
+            f"buffer_size={self.buffer_size}, backend={self.backend!r})"
         )
 
     def cardinality(self, parent: Cardinality) -> Cardinality:
@@ -99,6 +100,7 @@ class _ParallelMap[T, U]:
             self.fn,
             self.workers,
             self.buffer_size,
+            self.backend,
         )
 
 

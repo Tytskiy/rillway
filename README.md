@@ -86,7 +86,9 @@ input order, and the amount of work waiting in memory is bounded.
 dataset = numbers.parallel_map(read_and_decode, workers=8)
 ```
 
-Parallel mapping currently uses threads and is not checkpointable.
+Parallel mapping uses threads by default. For CPU-heavy Python work, use
+`backend="process"`. The function, input values, and results must then be
+picklable. Parallel mapping is not checkpointable.
 
 ## Resuming work
 
