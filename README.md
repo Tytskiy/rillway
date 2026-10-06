@@ -90,6 +90,17 @@ Parallel mapping uses threads by default. For CPU-heavy Python work, use
 `backend="process"`. The function, input values, and results must then be
 picklable. Parallel mapping is not checkpointable.
 
+Repeat a dataset when you need more than one pass. Indexed datasets can be
+shuffled differently on each pass while remaining reproducible:
+
+```python
+training = numbers.repeat(3, shuffle=True)
+```
+
+The default seed is `42`; pass `seed=...` when you want another order. Use
+`repeat(None)` for an endless dataset and combine it with `take()` when you
+want a fixed number of items.
+
 ## Resuming work
 
 Some datasets can save their current position and continue with a new cursor.
@@ -121,6 +132,7 @@ checkpoint when the pipeline does not match.
 - `flat_map`
 - `take` and `skip`
 - `batch`
+- `repeat`, with deterministic shuffling for indexed datasets
 - `concat`
 - `zip`
 - `shard` for datasets that can be split by range

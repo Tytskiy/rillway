@@ -347,6 +347,33 @@ def test_composed_cursor_can_resume_from_state():
     assert list(resumed) == expected == [(50, 70)]
 
 
+def test_repeat_cursor_resumes_across_epochs():
+    dataset = IndexedDataset.from_source(range(5)).repeat(None, shuffle=True)
+    cursor = dataset.cursor()
+    assert [next(cursor) for _ in range(7)]
+    state = cursor.state_dict()
+    expected = [next(cursor) for _ in range(8)]
+    cursor.close()
+
+    resumed = dataset.cursor()
+    resumed.load_state_dict(state)
+    assert [next(resumed) for _ in range(8)] == expected
+    resumed.close()
+
+
+def test_repeat_closes_each_parent_cursor():
+    closed = []
+    repeated = resource_stream([1], closed).repeat(2)
+
+    assert list(repeated) == [1, 1]
+    assert closed == [True, True]
+
+    cursor = resource_stream([1, 2], closed).repeat(None).cursor()
+    assert next(cursor) == 1
+    cursor.close()
+    assert closed == [True, True, True]
+
+
 def test_checkpoint_rejects_a_different_cursor_configuration():
     source = IndexedDataset.from_source(range(8)).filter(bool, name="truthy")
     datasets = [

@@ -473,6 +473,72 @@ class BatchCursor[T](_ParentCursor[T, tuple[T, ...]]):
         self._buffer = buffer
 
 
+class RepeatCursor[T](Cursor[T]):
+    def __init__(
+        self,
+        open_epoch: Callable[[int], Cursor[T]],
+        count: int | None,
+        operation: _CheckpointKey,
+    ):
+        super().__init__()
+        self._open_epoch = open_epoch
+        self._count = count
+        self._operation = operation
+        self._epoch = 0
+        self._active: Cursor[T] | None = None
+        self._yielded = False
+        self._active_resource = _CloseSlot()
+        self.callback(self._active_resource.close)
+
+    def _checkpoint_key(self) -> _CheckpointKey:
+        return "repeat", self._operation
+
+    def _load_state_dict(self, state: State) -> None:
+        epoch = to_index(state["epoch"])
+        if epoch < 0 or self._count is not None and epoch > self._count:
+            raise ValueError("repeat checkpoint has an invalid epoch")
+        yielded = state["yielded"]
+        if type(yielded) is not bool:
+            raise ValueError("repeat checkpoint has an invalid yielded flag")
+        active_state = state["active"]
+        if (active_state is None) == yielded:
+            raise ValueError("repeat checkpoint has inconsistent active state")
+        if active_state is not None and self._count is not None and epoch == self._count:
+            raise ValueError("repeat checkpoint has an invalid active epoch")
+        self._epoch = epoch
+        self._yielded = yielded
+        if active_state is not None:
+            self._active = self._open_epoch(epoch)
+            self._active_resource.replace(self._active)
+            self._active.load_state_dict(active_state)
+
+    def _next(self) -> T:
+        while self._count is None or self._epoch < self._count:
+            if self._active is None:
+                self._active = self._open_epoch(self._epoch)
+                self._active_resource.replace(self._active)
+                self._yielded = False
+            try:
+                value = next(self._active)
+            except StopIteration:
+                self._active_resource.close()
+                self._active = None
+                if not self._yielded:
+                    raise
+                self._epoch += 1
+            else:
+                self._yielded = True
+                return value
+        raise StopIteration
+
+    def _state_dict(self) -> State:
+        return {
+            "epoch": self._epoch,
+            "yielded": self._yielded,
+            "active": None if self._active is None else self._active.state_dict(),
+        }
+
+
 class ConcatCursor[T](Cursor[T]):
     def __init__(self, components: tuple[Dataset[T], ...]):
         super().__init__()

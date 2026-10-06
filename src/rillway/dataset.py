@@ -116,6 +116,9 @@ class Dataset[T](ABC):
     def batch(self, size: int, *, drop_last: bool = False) -> Dataset[tuple[T, ...]]:
         return _UnaryDataset(self, _Batch(_positive("size", size), drop_last))
 
+    def repeat(self, count: int | None) -> Dataset[T]:
+        return _repeat_dataset(self, count)
+
     def concat(self, *others: Dataset[T]) -> Dataset[T]:
         return _concat_datasets(self, others)
 
@@ -210,6 +213,21 @@ class RangeDataset[T](Dataset[T], ABC):
     def batch(self, size: int, *, drop_last: bool = False) -> RangeDataset[tuple[T, ...]]:
         return _UnaryRange(self, _Batch(_positive("size", size), drop_last))
 
+    @overload  # type: ignore[override]
+    def repeat(
+        self,
+        count: int,
+    ) -> RangeDataset[T]: ...
+
+    @overload
+    def repeat(
+        self,
+        count: None,
+    ) -> Dataset[T]: ...
+
+    def repeat(self, count: int | None) -> Dataset[T]:
+        return _repeat_dataset(self, count)
+
     @overload
     def concat(self, *others: RangeDataset[T]) -> RangeDataset[T]: ...
 
@@ -286,6 +304,33 @@ class IndexedDataset[T](RangeDataset[T], ABC):
 
     def batch(self, size: int, *, drop_last: bool = False) -> IndexedDataset[tuple[T, ...]]:
         return _UnaryIndexed(self, _Batch(_positive("size", size), drop_last))
+
+    @overload  # type: ignore[override]
+    def repeat(
+        self,
+        count: int,
+        *,
+        shuffle: bool = False,
+        seed: int = 42,
+    ) -> IndexedDataset[T]: ...
+
+    @overload
+    def repeat(
+        self,
+        count: None,
+        *,
+        shuffle: bool = False,
+        seed: int = 42,
+    ) -> Dataset[T]: ...
+
+    def repeat(
+        self,
+        count: int | None,
+        *,
+        shuffle: bool = False,
+        seed: int = 42,
+    ) -> Dataset[T]:
+        return _repeat_dataset(self, count, shuffle=shuffle, seed=seed)
 
     @overload  # type: ignore[override]
     def concat(
@@ -407,6 +452,88 @@ class _RangeSlice[T](RangeDataset[T]):
         stop: int,
     ) -> Cursor[T]:
         return self.parent.open_range(self.start + start, self.start + stop)
+
+
+@dataclass(frozen=True, slots=True)
+class _RepeatRange[T](RangeDataset[T]):
+    supports_checkpointing = True
+
+    parent: RangeDataset[T]
+    count: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Exact:
+        return Exact(len(self.parent) * self.count)
+
+    @property
+    def description(self) -> str:
+        return _repeat_description(self.count, False, 42)
+
+    def _open_range(self, start: int, stop: int) -> Cursor[T]:
+        length = len(self.parent)
+        if length == 0:
+            return cursors.ConcatCursor(())
+        components = []
+        while start < stop:
+            offset = start % length
+            component_stop = min(length, offset + stop - start)
+            components.append(_RangeSlice(self.parent, offset, component_stop))
+            start += component_stop - offset
+        return cursors.ConcatCursor(tuple(components))
+
+
+@dataclass(frozen=True, slots=True)
+class _RepeatIndexed[T](IndexedDataset[T]):
+    parent: IndexedDataset[T]
+    count: int
+    shuffle: bool
+    seed: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Exact:
+        return Exact(len(self.parent) * self.count)
+
+    @property
+    def description(self) -> str:
+        return _repeat_description(self.count, self.shuffle, self.seed)
+
+    def _get(self, position: int) -> T:
+        length = len(self.parent)
+        epoch, position = divmod(position, length)
+        if self.shuffle:
+            position = _shuffle_position(position, length, self.seed, epoch)
+        return self.parent._get(position)
+
+
+@dataclass(frozen=True, slots=True)
+class _ShuffledEpochIndexed[T](IndexedDataset[T]):
+    parent: IndexedDataset[T]
+    seed: int
+    epoch: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Exact:
+        return self.parent.cardinality
+
+    @property
+    def description(self) -> str:
+        return f"Shuffle(seed={self.seed}, epoch={self.epoch})"
+
+    def _get(self, position: int) -> T:
+        position = _shuffle_position(position, len(self.parent), self.seed, self.epoch)
+        return self.parent._get(position)
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +671,41 @@ class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
 
     def cursor(self) -> Cursor[U]:
         return self.operation.open(self.parent.cursor())
+
+
+@dataclass(frozen=True, slots=True)
+class _RepeatDataset[T](Dataset[T]):
+    supports_checkpointing = True
+
+    parent: Dataset[T]
+    count: int | None
+    shuffle: bool
+    seed: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Cardinality:
+        return _repeat_cardinality(self.parent.cardinality, self.count)
+
+    @property
+    def description(self) -> str:
+        return _repeat_description(self.count, self.shuffle, self.seed)
+
+    def cursor(self) -> Cursor[T]:
+        return cursors.RepeatCursor(
+            self._open_epoch,
+            self.count,
+            self.explain(),
+        )
+
+    def _open_epoch(self, epoch: int) -> Cursor[T]:
+        if self.shuffle:
+            assert isinstance(self.parent, IndexedDataset)
+            return _ShuffledEpochIndexed(self.parent, self.seed, epoch).cursor()
+        return self.parent.cursor()
 
 
 @dataclass(frozen=True, slots=True)
@@ -757,6 +919,83 @@ def _zip_datasets[T, U](
     if isinstance(left, RangeDataset) and isinstance(right, RangeDataset):
         return _ZipRange(left, right, strict)
     return _ZipDataset(left, right, strict)
+
+
+def _repeat_dataset[T](
+    parent: Dataset[T],
+    count: int | None,
+    *,
+    shuffle: bool = False,
+    seed: int = 42,
+) -> Dataset[T]:
+    count = None if count is None else _nonnegative("count", count)
+    seed = to_index(seed)
+    if shuffle and not isinstance(parent, IndexedDataset):
+        raise TypeError("shuffled repetition requires an IndexedDataset")
+    if count is not None:
+        if isinstance(parent, IndexedDataset):
+            return _RepeatIndexed(parent, count, shuffle, seed)
+        if isinstance(parent, RangeDataset):
+            return _RepeatRange(parent, count)
+    return _RepeatDataset(parent, count, shuffle, seed)
+
+
+def _repeat_cardinality(parent: Cardinality, count: int | None) -> Cardinality:
+    if (
+        count == 0
+        or isinstance(parent, Exact)
+        and parent == 0
+        or isinstance(parent, Bounds)
+        and parent.upper == 0
+    ):
+        return Exact(0)
+    if count is None:
+        if isinstance(parent, Exact) or isinstance(parent, Infinite):
+            return Infinite()
+        if isinstance(parent, Bounds) and parent.lower > 0:
+            return Infinite()
+        return Unknown()
+    if isinstance(parent, Exact):
+        return Exact(parent * count)
+    if isinstance(parent, Bounds):
+        return Bounds(parent.lower * count, parent.upper * count)
+    return parent
+
+
+def _repeat_description(count: int | None, shuffle: bool, seed: int) -> str:
+    if shuffle:
+        return f"Repeat(count={count}, shuffle=True, seed={seed})"
+    return f"Repeat(count={count}, shuffle=False)"
+
+
+_UINT64_MASK = (1 << 64) - 1
+
+
+def _mix64(value: int) -> int:
+    value = (value + 0x9E3779B97F4A7C15) & _UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return value ^ (value >> 31)
+
+
+def _shuffle_position(position: int, length: int, seed: int, epoch: int) -> int:
+    if length < 2:
+        return position
+    bits = (length - 1).bit_length()
+    bits += bits % 2
+    half_bits = bits // 2
+    half_mask = (1 << half_bits) - 1
+    key = _mix64((seed & _UINT64_MASK) ^ _mix64(epoch))
+
+    # Cycle walking restricts the Feistel permutation to exactly [0, length).
+    while True:
+        left, right = position >> half_bits, position & half_mask
+        for round_index in range(6):
+            round_key = key ^ (round_index * 0x9E3779B97F4A7C15)
+            left, right = right, left ^ (_mix64(right ^ round_key) & half_mask)
+        position = (left << half_bits) | right
+        if position < length:
+            return position
 
 
 def _callable_name(fn: Callable[..., Any], name: str | None) -> str:

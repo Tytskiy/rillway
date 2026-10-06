@@ -9,6 +9,7 @@ from rillway import (
     Exact,
     IndexedDataset,
     IndexedSource,
+    Infinite,
     RangeDataset,
 )
 
@@ -231,6 +232,52 @@ def test_batch_preserves_indexing_and_calculates_cardinality():
     assert list(batches) == [(0, 1), (2, 3), (4,)]
     assert dropped.cardinality == Exact(2)
     assert list(dropped) == [(0, 1), (2, 3)]
+
+
+def test_indexed_repeat_is_lazy_reproducible_and_shuffles_each_pass():
+    source = IndexedDataset.from_source(range(17))
+    repeated = source.repeat(3, shuffle=True)
+
+    assert isinstance(repeated, IndexedDataset)
+    assert repeated.cardinality == Exact(51)
+    assert list(repeated) == list(source.repeat(3, shuffle=True, seed=42))
+    assert list(repeated) == list(source.repeat(None, shuffle=True).take(51))
+    assert list(repeated) != list(source.repeat(3, shuffle=True, seed=7))
+
+    epochs = [tuple(repeated[start : start + 17]) for start in range(0, 51, 17)]
+    assert all(sorted(epoch) == list(range(17)) for epoch in epochs)
+    assert len(set(epochs)) == 3
+
+
+def test_stream_repeat_reopens_the_parent_and_can_run_forever():
+    opened = []
+
+    def factory():
+        opened.append(True)
+        return iter([1, 2])
+
+    stream = Dataset.from_factory(factory, cardinality=Exact(2))
+    repeated = stream.repeat(3)
+
+    assert repeated.cardinality == Exact(6)
+    assert list(repeated) == [1, 2, 1, 2, 1, 2]
+    assert len(opened) == 3
+
+    endless = stream.repeat(None)
+    assert endless.cardinality == Infinite()
+    assert list(endless.take(5)) == [1, 2, 1, 2, 1]
+
+    empty = Dataset.from_factory(lambda: iter(()), cardinality=Exact(0)).repeat(None)
+    assert list(empty) == []
+
+
+def test_repeat_validates_count_and_only_indexed_datasets_expose_shuffle():
+    stream = Dataset.from_factory(lambda: iter([1]))
+
+    with pytest.raises(ValueError, match="nonnegative"):
+        stream.repeat(-1)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        stream.repeat(2, shuffle=True)
 
 
 def test_stream_batch_handles_partial_final_batch_and_closes():

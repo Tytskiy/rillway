@@ -250,6 +250,16 @@ def test_shards_are_lazy_balanced_disjoint_and_complete():
     assert source.opens == [(0, 3), (3, 6), (6, 10)]
 
 
+def test_repeat_preserves_range_access():
+    source = RecordingRange(3)
+    repeated = source.repeat(3)
+
+    assert isinstance(repeated, RangeDataset)
+    assert len(repeated) == 9
+    assert list(repeated.open_range(2, 7)) == [2, 0, 1, 2, 0]
+    assert source.opens == [(2, 3), (0, 3), (0, 1)]
+
+
 def test_map_and_shard_propagate_one_range_to_the_source():
     source = RecordingRange(16)
     dataset = source.map(lambda value: value * 2, name="double").shard(2, 4)
