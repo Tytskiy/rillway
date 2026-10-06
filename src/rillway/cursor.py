@@ -5,11 +5,15 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import AbstractContextManager, ExitStack
+from dataclasses import dataclass
 from multiprocessing import get_context
 from operator import index as to_index
+from threading import Thread, current_thread
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 from weakref import finalize
+
+from ._queue import _QueueClosed, _ThreadingQueue
 
 if TYPE_CHECKING:
     from .dataset import Dataset, IndexedDataset
@@ -294,6 +298,85 @@ class ParallelMapCursor[T, U](Cursor[U]):
         value = pending.result()
         self._fill()
         return value
+
+
+@dataclass(slots=True)
+class _PrefetchFailure:
+    error: BaseException
+
+
+class _PrefetchDone:
+    pass
+
+
+@dataclass(slots=True)
+class _PrefetchedValue[T]:
+    value: T
+
+
+type _PrefetchItem[T] = _PrefetchedValue[T] | _PrefetchFailure | _PrefetchDone
+
+
+class _PrefetchState[T]:
+    def __init__(self, parent: Cursor[T], buffer_size: int):
+        self._parent = parent
+        self._queue = _ThreadingQueue[_PrefetchItem[T]](buffer_size)
+        self._thread: Thread | None = None
+
+    def get(self) -> T:
+        if self._thread is None:
+            self._thread = Thread(
+                target=self._produce,
+                name="rillway-prefetch",
+                daemon=True,
+            )
+            self._thread.start()
+        try:
+            item = self._queue.get()
+        except _QueueClosed:
+            raise StopIteration from None
+        if isinstance(item, _PrefetchedValue):
+            return item.value
+        if isinstance(item, _PrefetchDone):
+            raise StopIteration
+        if isinstance(item, _PrefetchFailure):
+            raise item.error
+        raise AssertionError("invalid prefetch item")
+
+    def close(self) -> None:
+        self._queue.close()
+        self._parent.close()
+        if self._thread is not None and self._thread is not current_thread():
+            self._thread.join()
+
+    def _produce(self) -> None:
+        try:
+            while True:
+                try:
+                    value = next(self._parent)
+                    item: _PrefetchItem[T] = _PrefetchedValue(value)
+                except StopIteration:
+                    item = _PrefetchDone()
+                except BaseException as error:
+                    item = _PrefetchFailure(error)
+                try:
+                    self._queue.put(item)
+                except _QueueClosed:
+                    return
+                if isinstance(item, _PrefetchDone | _PrefetchFailure):
+                    return
+        finally:
+            self._parent.close()
+
+
+class PrefetchCursor[T](Cursor[T]):
+    def __init__(self, parent: Cursor[T], buffer_size: int):
+        super().__init__()
+        self._state = _PrefetchState(parent, buffer_size)
+        self.callback(self._state.close)
+
+    def _next(self) -> T:
+        return self._state.get()
 
 
 class _CloseSlot:

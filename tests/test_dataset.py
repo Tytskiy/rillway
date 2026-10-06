@@ -175,6 +175,25 @@ def test_parallel_map_can_use_process_workers():
     assert all(process != parent_process for process, _ in results)
 
 
+def test_prefetch_runs_its_parent_in_the_background_and_preserves_order():
+    second_read = Event()
+
+    def factory():
+        yield 0
+        second_read.set()
+        yield 1
+
+    dataset = Dataset.from_factory(factory, cardinality=Exact(2)).prefetch(1)
+    cursor = dataset.cursor()
+
+    assert not second_read.is_set()
+    assert next(cursor) == 0
+    assert second_read.wait(2)
+    assert list(cursor) == [1]
+    assert dataset.cardinality == Exact(2)
+    assert dataset.explain().startswith("Prefetch(buffer_size=1)")
+
+
 def test_plan_is_inspectable():
     dataset = (
         IndexedDataset.from_source(range(5))
@@ -406,3 +425,8 @@ def test_structural_operations_validate_counts(method, value):
 def test_parallel_map_validates_limits(options):
     with pytest.raises(ValueError):
         IndexedDataset.from_source([1]).parallel_map(str, **options)
+
+
+def test_prefetch_requires_a_positive_buffer_size():
+    with pytest.raises(ValueError, match="positive"):
+        IndexedDataset.from_source([1]).prefetch(0)

@@ -1,4 +1,5 @@
 import gc
+from threading import Event
 
 import pytest
 
@@ -134,6 +135,51 @@ def test_parallel_map_failure_closes_upstream():
     assert closed == [True]
 
 
+def test_prefetch_propagates_failures_and_closes_upstream():
+    closed = []
+
+    def factory():
+        try:
+            yield 1
+            raise RuntimeError("source failed")
+        finally:
+            closed.append(True)
+
+    cursor = Dataset.from_factory(factory).prefetch(1).cursor()
+
+    assert next(cursor) == 1
+    with pytest.raises(RuntimeError, match="source failed"):
+        next(cursor)
+    assert cursor.closed
+    assert closed == [True]
+
+
+def test_prefetch_closes_upstream_when_stopped_or_abandoned():
+    closed = []
+    third_read = Event()
+
+    def factory():
+        try:
+            yield 0
+            yield 1
+            third_read.set()
+            yield 2
+        finally:
+            closed.append(True)
+
+    cursor = Dataset.from_factory(factory).prefetch(1).cursor()
+    assert next(cursor) == 0
+    assert third_read.wait(2)
+    cursor.close()
+    assert closed == [True]
+
+    cursor = resource_stream(range(100), closed).prefetch(1).cursor()
+    assert next(cursor) == 0
+    del cursor
+    gc.collect()
+    assert closed == [True, True]
+
+
 def test_owned_context_receives_with_block_exception():
     received = []
 
@@ -222,14 +268,19 @@ def test_factory_stream_is_lazy_replayable_and_explicitly_not_checkpointable():
         restored.load_state_dict({"position": 1})
 
 
-def test_parallel_map_is_explicitly_not_checkpointable():
-    dataset = IndexedDataset.from_source(range(3)).parallel_map(str, workers=2)
+def test_parallel_execution_is_not_checkpointable():
+    source = IndexedDataset.from_source(range(3))
+    datasets = [
+        source.parallel_map(str, workers=1),
+        source.prefetch(1),
+    ]
 
-    assert not dataset.checkpointable
-    cursor = dataset.cursor()
-    with pytest.raises(TypeError, match="not checkpointable"):
-        cursor.state_dict()
-    cursor.close()
+    for dataset in datasets:
+        assert not dataset.checkpointable
+        cursor = dataset.cursor()
+        with pytest.raises(TypeError, match="not checkpointable"):
+            cursor.state_dict()
+        cursor.close()
 
 
 def test_custom_dataset_must_opt_in_to_checkpointing():

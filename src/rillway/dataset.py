@@ -101,6 +101,9 @@ class Dataset[T](ABC):
             ),
         )
 
+    def prefetch(self, buffer_size: int) -> Dataset[T]:
+        return _PrefetchDataset(self, _positive("buffer_size", buffer_size))
+
     def filter(self, predicate: Callable[[T], bool], *, name: str | None = None) -> Dataset[T]:
         return _UnaryDataset(self, _Filter(predicate, _callable_name(predicate, name)))
 
@@ -671,6 +674,27 @@ class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
 
     def cursor(self) -> Cursor[U]:
         return self.operation.open(self.parent.cursor())
+
+
+@dataclass(frozen=True, slots=True)
+class _PrefetchDataset[T](Dataset[T]):
+    parent: Dataset[T]
+    buffer_size: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Cardinality:
+        return self.parent.cardinality
+
+    @property
+    def description(self) -> str:
+        return f"Prefetch(buffer_size={self.buffer_size})"
+
+    def cursor(self) -> Cursor[T]:
+        return cursors.PrefetchCursor(self.parent.cursor(), self.buffer_size)
 
 
 @dataclass(frozen=True, slots=True)

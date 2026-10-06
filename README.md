@@ -88,7 +88,17 @@ dataset = numbers.parallel_map(read_and_decode, workers=8)
 
 Parallel mapping uses threads by default. For CPU-heavy Python work, use
 `backend="process"`. The function, input values, and results must then be
-picklable. Parallel mapping is not checkpointable.
+picklable.
+
+Place `prefetch` after the work you want to overlap with the consumer. It runs
+the complete pipeline before that point in one background thread and keeps a
+small number of ready elements:
+
+```python
+dataset = numbers.map(read_and_decode).batch(32).prefetch(2)
+```
+
+Parallel mapping and prefetching are not checkpointable.
 
 Repeat a dataset when you need more than one pass. Indexed datasets can be
 shuffled differently on each pass while remaining reproducible:
@@ -128,6 +138,7 @@ checkpoint when the pipeline does not match.
 
 - `map`
 - `parallel_map`
+- `prefetch`
 - `filter`
 - `flat_map`
 - `take` and `skip`
