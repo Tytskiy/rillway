@@ -8,7 +8,7 @@ from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from multiprocessing import get_context
 from operator import index as to_index
-from threading import Thread, current_thread
+from threading import Lock, Thread, current_thread
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 from weakref import finalize
@@ -22,6 +22,7 @@ type State = dict[str, Any]
 type _CheckpointKey = str | int | bool | tuple[_CheckpointKey, ...]
 
 _STATE_VERSION = 1
+_READ_AHEAD_SNAPSHOT_INTERVAL = 64
 
 
 class Cursor[T](Iterator[T], ABC):
@@ -274,6 +275,61 @@ class TransformCursor[T, U](_ParentCursor[T, U]):
         return next(self._iterator)
 
 
+class _ReadAheadCheckpoint[T]:
+    def __init__(self, parent: Cursor[T]):
+        self._parent = parent
+        self._lock = Lock()
+        self._anchor = parent.state_dict()
+        self._anchor_position = 0
+        self._produced = 0
+        self._consumed = 0
+        self._snapshots: deque[tuple[int, State]] = deque()
+
+    def produced(self) -> None:
+        self._produced += 1
+        if self._produced % _READ_AHEAD_SNAPSHOT_INTERVAL:
+            return
+        snapshot = self._parent.state_dict()
+        with self._lock:
+            self._snapshots.append((self._produced, snapshot))
+
+    def consumed(self) -> None:
+        with self._lock:
+            self._consumed += 1
+            while self._snapshots and self._snapshots[0][0] <= self._consumed:
+                self._anchor_position, self._anchor = self._snapshots.popleft()
+
+    def state_dict(self) -> State:
+        with self._lock:
+            return {
+                "parent": self._anchor,
+                "replay": self._consumed - self._anchor_position,
+            }
+
+    def load_state_dict(self, state: State) -> None:
+        try:
+            parent_state = state["parent"]
+            replay = to_index(state["replay"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("invalid read-ahead checkpoint") from error
+        if not 0 <= replay < _READ_AHEAD_SNAPSHOT_INTERVAL:
+            raise ValueError("read-ahead checkpoint has an invalid replay count")
+
+        self._parent.load_state_dict(parent_state)
+        for _ in range(replay):
+            try:
+                next(self._parent)
+            except StopIteration as error:
+                raise ValueError("read-ahead checkpoint exceeds the parent") from error
+
+        with self._lock:
+            self._anchor = parent_state
+            self._anchor_position = 0
+            self._produced = replay
+            self._consumed = replay
+            self._snapshots.clear()
+
+
 class ParallelMapCursor[T, U](Cursor[U]):
     def __init__(
         self,
@@ -290,6 +346,7 @@ class ParallelMapCursor[T, U](Cursor[U]):
         self._capacity = workers + buffer_size
         self._pending: deque[Future[U]] = deque()
         self._parent_done = False
+        self._checkpoint = _ReadAheadCheckpoint(parent) if parent.checkpointable else None
         self._executor: Executor
         if backend == "thread":
             self._executor = ThreadPoolExecutor(max_workers=workers)
@@ -301,6 +358,10 @@ class ParallelMapCursor[T, U](Cursor[U]):
         else:
             raise ValueError(f"unsupported parallel backend: {backend!r}")
         self.callback(self._executor.shutdown, wait=True, cancel_futures=True)
+
+    @property
+    def checkpointable(self) -> bool:
+        return self._checkpoint is not None
 
     def _fill(self) -> None:
         while not self._parent_done and len(self._pending) < self._capacity:
@@ -314,7 +375,10 @@ class ParallelMapCursor[T, U](Cursor[U]):
                 failure.set_exception(error)
                 self._pending.append(failure)
             else:
-                self._pending.append(self._executor.submit(self._fn, value))
+                pending = self._executor.submit(self._fn, value)
+                if self._checkpoint is not None:
+                    self._checkpoint.produced()
+                self._pending.append(pending)
 
     def _next(self) -> U:
         self._fill()
@@ -323,7 +387,19 @@ class ParallelMapCursor[T, U](Cursor[U]):
         pending = self._pending.popleft()
         value = pending.result()
         self._fill()
+        if self._checkpoint is not None:
+            self._checkpoint.consumed()
         return value
+
+    def _state_dict(self) -> State:
+        if self._checkpoint is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        return self._checkpoint.state_dict()
+
+    def _load_state_dict(self, state: State) -> None:
+        if self._checkpoint is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        self._checkpoint.load_state_dict(state)
 
 
 @dataclass(slots=True)
@@ -344,8 +420,14 @@ type _PrefetchItem[T] = _PrefetchedValue[T] | _PrefetchFailure | _PrefetchDone
 
 
 class _PrefetchState[T]:
-    def __init__(self, parent: Cursor[T], buffer_size: int):
+    def __init__(
+        self,
+        parent: Cursor[T],
+        buffer_size: int,
+        checkpoint: _ReadAheadCheckpoint[T] | None,
+    ):
         self._parent = parent
+        self._checkpoint = checkpoint
         self._queue = _ThreadingQueue[_PrefetchItem[T]](buffer_size)
         self._thread: Thread | None = None
 
@@ -362,6 +444,8 @@ class _PrefetchState[T]:
         except _QueueClosed:
             raise StopIteration from None
         if isinstance(item, _PrefetchedValue):
+            if self._checkpoint is not None:
+                self._checkpoint.consumed()
             return item.value
         if isinstance(item, _PrefetchDone):
             raise StopIteration
@@ -380,6 +464,8 @@ class _PrefetchState[T]:
             while True:
                 try:
                     value = next(self._parent)
+                    if self._checkpoint is not None:
+                        self._checkpoint.produced()
                     item: _PrefetchItem[T] = _PrefetchedValue(value)
                 except StopIteration:
                     item = _PrefetchDone()
@@ -398,11 +484,26 @@ class _PrefetchState[T]:
 class PrefetchCursor[T](Cursor[T]):
     def __init__(self, dataset: Dataset[T], parent: Cursor[T], buffer_size: int):
         super().__init__(dataset)
-        self._state = _PrefetchState(parent, buffer_size)
+        self._checkpoint = _ReadAheadCheckpoint(parent) if parent.checkpointable else None
+        self._state = _PrefetchState(parent, buffer_size, self._checkpoint)
         self.callback(self._state.close)
+
+    @property
+    def checkpointable(self) -> bool:
+        return self._checkpoint is not None
 
     def _next(self) -> T:
         return self._state.get()
+
+    def _state_dict(self) -> State:
+        if self._checkpoint is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        return self._checkpoint.state_dict()
+
+    def _load_state_dict(self, state: State) -> None:
+        if self._checkpoint is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        self._checkpoint.load_state_dict(state)
 
 
 class _CloseSlot:

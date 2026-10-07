@@ -98,7 +98,9 @@ small number of ready elements:
 dataset = numbers.map(read_and_decode).batch(32).prefetch(2)
 ```
 
-Parallel mapping and prefetching are not checkpointable.
+Parallel mapping and prefetching are checkpointable when their input is. Their
+checkpoints follow consumer progress rather than read-ahead progress; restoring
+may replay a small bounded number of input elements per asynchronous boundary.
 
 Repeat a dataset when you need more than one pass. Indexed datasets can be
 shuffled differently on each pass while remaining reproducible:

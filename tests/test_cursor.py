@@ -269,8 +269,68 @@ def test_factory_stream_is_lazy_replayable_and_explicitly_not_checkpointable():
         restored.load_state_dict({"position": 1})
 
 
-def test_parallel_execution_is_not_checkpointable():
-    source = IndexedDataset.from_source(range(3))
+def test_read_ahead_operators_checkpoint_consumer_progress():
+    source = IndexedDataset.from_source(range(100)).filter(lambda value: value % 2 == 0)
+    cases = [
+        (
+            source.parallel_map(str, workers=2, buffer_size=2),
+            list(map(str, range(0, 70, 2))),
+        ),
+        (source.prefetch(4), list(range(0, 70, 2))),
+    ]
+
+    for dataset, prefix in cases:
+        assert dataset.checkpointable
+        cursor = dataset.cursor()
+        assert cursor.checkpointable
+        assert [next(cursor) for _ in range(35)] == prefix
+        state = cursor.state_dict()
+        expected = list(cursor)
+
+        assert state["state"]["replay"] == 35
+        resumed = dataset.cursor()
+        resumed.load_state_dict(state)
+        assert list(resumed) == expected
+
+
+def test_read_ahead_operators_take_periodic_parent_snapshots():
+    source = IndexedDataset.from_source(range(100))
+    datasets = [
+        source.parallel_map(str, workers=2, buffer_size=2),
+        source.prefetch(4),
+    ]
+
+    for dataset in datasets:
+        cursor = dataset.cursor()
+        assert len([next(cursor) for _ in range(70)]) == 70
+        state = cursor.state_dict()
+        expected = list(cursor)
+
+        assert state["state"]["replay"] == 6
+        resumed = dataset.cursor()
+        resumed.load_state_dict(state)
+        assert list(resumed) == expected
+
+
+def test_nested_read_ahead_operators_resume_together():
+    dataset = (
+        IndexedDataset.from_source(range(200))
+        .filter(lambda value: value % 3 == 0)
+        .parallel_map(lambda value: value * 10, workers=2, buffer_size=2, name="scale")
+        .prefetch(4)
+    )
+    cursor = dataset.cursor()
+    assert len([next(cursor) for _ in range(65)]) == 65
+    state = cursor.state_dict()
+    expected = list(cursor)
+
+    resumed = dataset.cursor()
+    resumed.load_state_dict(state)
+    assert list(resumed) == expected == [1950, 1980]
+
+
+def test_read_ahead_operators_remain_uncheckpointable_with_an_uncheckpointable_parent():
+    source = Dataset.from_factory(lambda: range(3))
     datasets = [
         source.parallel_map(str, workers=1),
         source.prefetch(1),
@@ -455,6 +515,11 @@ def test_checkpoint_rejects_a_different_cursor_configuration():
     source = IndexedDataset.from_source(range(8)).filter(bool, name="truthy")
     datasets = [
         (source.map(str, name="string"), source.map(float, name="float")),
+        (
+            source.parallel_map(str, workers=1, name="string"),
+            source.parallel_map(str, workers=2, name="string"),
+        ),
+        (source.prefetch(1), source.prefetch(2)),
         (source.take(4), source.take(5)),
         (source.skip(4), source.skip(5)),
         (source.batch(2), source.batch(3)),

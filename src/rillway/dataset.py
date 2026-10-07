@@ -644,6 +644,8 @@ class _UnaryDataset[T, U](_UnaryNode[T], Dataset[U]):
 
 @dataclass(frozen=True, slots=True)
 class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
+    supports_checkpointing = True
+
     parent: Dataset[T]
     operation: _ParallelMap[T, U]
 
@@ -657,6 +659,8 @@ class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
 
 @dataclass(frozen=True, slots=True)
 class _PrefetchDataset[T](Dataset[T]):
+    supports_checkpointing = True
+
     parent: Dataset[T]
     buffer_size: int
 
