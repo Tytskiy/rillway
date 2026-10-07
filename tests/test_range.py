@@ -17,7 +17,7 @@ class PositionCursor(Cursor[int]):
         self.position = start
         self.stop = stop
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         position = to_index(state["position"])
         if not self.start <= position <= self.stop:
             raise ValueError("cursor position is outside the requested range")
@@ -30,7 +30,7 @@ class PositionCursor(Cursor[int]):
         self.position += 1
         return value
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {"position": self.position}
 
 
@@ -125,14 +125,14 @@ class HDFSCursor(Cursor[int]):
         self.position += 1
         return value
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {
             "path": self.path,
             "version": self.version,
             "position": self.position,
         }
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         if (state.get("path"), state.get("version")) != (self.path, self.version):
             raise ValueError("checkpoint belongs to a different HDFS source")
         position = to_index(state["position"])

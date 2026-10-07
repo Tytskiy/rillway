@@ -1,16 +1,16 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from importlib import import_module
-from operator import index as to_index
 from os import PathLike
 from pathlib import Path
 from typing import Any, BinaryIO, ClassVar, cast
 
 from ._file import (
     _FileIdentity,
+    _load_file_position,
     _open_file_identity,
-    _parse_file_identity,
-    _path_identity,
+    _save_file_position,
+    _validate_open_file,
 )
 from .cardinality import Exact
 from .cursor import Cursor, State
@@ -106,8 +106,7 @@ class _ParquetCursor(Cursor[dict[str, object]]):
     def _open(self) -> None:
         reader = open(self._parquet_dataset.path, "rb")
         self.callback(reader.close)
-        if _open_file_identity(reader) != self._parquet_dataset._identity:
-            raise ValueError("Parquet source file changed")
+        _validate_open_file(reader, self._parquet_dataset._identity)
 
         parquet_file = _pyarrow_parquet().ParquetFile(reader)
         self.callback(parquet_file.close)
@@ -155,26 +154,19 @@ class _ParquetCursor(Cursor[dict[str, object]]):
         self._position += 1
         return row
 
-    def _state_dict(self) -> State:
-        identity = (
-            _path_identity(self._parquet_dataset.path)
-            if self._reader is None
-            else _open_file_identity(self._reader)
+    def _snapshot(self) -> State:
+        state, _ = _save_file_position(
+            self._parquet_dataset.path,
+            self._reader,
+            self._parquet_dataset._identity,
+            self._position,
         )
-        if identity != self._parquet_dataset._identity:
-            raise RuntimeError("Parquet source file changed")
-        return {"position": self._position, "source": identity}
+        return state
 
-    def _load_state_dict(self, state: State) -> None:
-        try:
-            position = to_index(state["position"])
-            identity = _parse_file_identity(state["source"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("invalid Parquet checkpoint") from error
+    def _restore(self, state: State) -> None:
+        position, identity = _load_file_position(state, self._parquet_dataset.path)
         if not self._start <= position <= self._stop:
             raise ValueError("Parquet checkpoint position is outside the requested range")
         if identity != self._parquet_dataset._identity:
             raise ValueError("Parquet checkpoint belongs to a different source file")
-        if _path_identity(self._parquet_dataset.path) != identity:
-            raise ValueError("Parquet source file changed")
         self._position = position

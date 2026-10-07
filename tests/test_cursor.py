@@ -428,10 +428,10 @@ def test_custom_dataset_and_cursor_define_a_checkpointable_source():
             self.position += 1
             return value
 
-        def _state_dict(self):
+        def _snapshot(self):
             return {"position": self.position}
 
-        def _load_state_dict(self, state):
+        def _restore(self, state):
             self.position = state["position"]
 
     class CounterDataset(Dataset[int]):
@@ -534,6 +534,24 @@ def test_composed_cursor_can_resume_from_state():
     assert list(resumed) == expected == [(50, 70)]
 
 
+def test_composed_checkpoint_has_one_public_envelope():
+    dataset = (
+        IndexedDataset.from_source(range(10))
+        .filter(lambda value: value % 2 == 0)
+        .batch(2)
+    )
+    cursor = dataset.cursor()
+    assert next(cursor) == (0, 2)
+
+    checkpoint = cursor.state_dict()
+
+    assert checkpoint["version"] == 2
+    assert checkpoint["state"] == {
+        "parent": {"parent": {"position": 3}},
+        "buffer": [],
+    }
+
+
 def test_repeat_cursor_resumes_across_epochs():
     dataset = IndexedDataset.from_source(range(5)).repeat(None, shuffle=True)
     cursor = dataset.cursor()
@@ -589,7 +607,7 @@ def test_checkpoint_rejects_a_different_cursor_configuration():
 def test_checkpoint_rejects_an_unsupported_version():
     dataset = IndexedDataset.from_source(range(3))
     checkpoint = dataset.cursor().state_dict()
-    checkpoint["version"] = 2
+    checkpoint["version"] = 1
 
     resumed = dataset.cursor()
     with pytest.raises(ValueError, match="unsupported checkpoint version"):

@@ -1,16 +1,15 @@
 import csv
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from operator import index as to_index
 from os import PathLike
 from pathlib import Path
 from typing import TextIO
 
 from ._file import (
     _FileIdentity,
-    _open_file_identity,
-    _parse_file_identity,
-    _path_identity,
+    _load_file_position,
+    _save_file_position,
+    _validate_open_file,
 )
 from .cardinality import Cardinality, Unknown
 from .cursor import Cursor, State
@@ -100,10 +99,7 @@ class _CsvCursor(Cursor[dict[str, str]]):
             newline="",
         )
         self.callback(self._reader.close)
-        identity = _open_file_identity(self._reader)
-        if self._identity is not None and identity != self._identity:
-            raise ValueError("CSV source file changed")
-        self._identity = identity
+        self._identity = _validate_open_file(self._reader, self._identity)
         rows = csv.reader(_CsvLines(self._reader), delimiter=self._csv_dataset.delimiter)
         if self._csv_dataset.columns is None:
             try:
@@ -131,26 +127,17 @@ class _CsvCursor(Cursor[dict[str, str]]):
         self._offset = self._reader.tell()
         return dict(zip(self._columns, row, strict=True))
 
-    def _state_dict(self) -> State:
-        identity = (
-            _path_identity(self._csv_dataset.path)
-            if self._reader is None
-            else _open_file_identity(self._reader)
+    def _snapshot(self) -> State:
+        state, self._identity = _save_file_position(
+            self._csv_dataset.path,
+            self._reader,
+            self._identity,
+            self._offset,
         )
-        if self._identity is not None and identity != self._identity:
-            raise RuntimeError("CSV source file changed")
-        self._identity = identity
-        return {"offset": self._offset, "source": identity}
+        return state
 
-    def _load_state_dict(self, state: State) -> None:
-        try:
-            offset = to_index(state["offset"])
-            identity = _parse_file_identity(state["source"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("invalid CSV checkpoint") from error
-        if offset < 0:
-            raise ValueError("CSV checkpoint has an invalid offset")
-        if _path_identity(self._csv_dataset.path) != identity:
-            raise ValueError("CSV source file changed")
-        self._offset = offset
-        self._identity = identity
+    def _restore(self, state: State) -> None:
+        self._offset, self._identity = _load_file_position(
+            state,
+            self._csv_dataset.path,
+        )

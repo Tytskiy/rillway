@@ -27,7 +27,7 @@ def test_jsonl_checkpoint_uses_byte_offset(tmp_path):
     state = cursor.state_dict()
     expected = list(cursor)
 
-    assert state["state"]["offset"] == len(first.encode())
+    assert state["state"]["position"] == len(first.encode())
     assert "source" in state["state"]
     resumed = dataset.cursor()
     resumed.load_state_dict(state)

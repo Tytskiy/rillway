@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 type State = dict[str, Any]
 type _CheckpointKey = str | int | bool | tuple[_CheckpointKey, ...]
 
-_STATE_VERSION = 1
+_STATE_VERSION = 2
 _READ_AHEAD_SNAPSHOT_INTERVAL = 64
 
 
@@ -83,7 +83,7 @@ class Cursor[T](Iterator[T], ABC):
         return {
             "version": _STATE_VERSION,
             "cursor": self._checkpoint_key(),
-            "state": self._state_dict(),
+            "state": self._snapshot(),
         }
 
     def load_state_dict(self, state: State) -> None:
@@ -93,15 +93,15 @@ class Cursor[T](Iterator[T], ABC):
             raise RuntimeError("cannot restore a closed cursor")
         self._require_checkpointable()
         try:
-            self._load_state_dict(self._checkpoint_payload(state))
+            self._restore(self._checkpoint_payload(state))
         except BaseException as error:
             self._exit(type(error), error, error.__traceback__)
             raise
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         raise TypeError(f"{type(self).__name__} is not checkpointable")
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         raise TypeError(f"{type(self).__name__} is not checkpointable")
 
     def _checkpoint_key(self) -> _CheckpointKey:
@@ -116,8 +116,8 @@ class Cursor[T](Iterator[T], ABC):
             return self._dataset.checkpointable
         cursor_type = type(self)
         return not (
-            cursor_type._state_dict is Cursor._state_dict
-            or cursor_type._load_state_dict is Cursor._load_state_dict
+            cursor_type._snapshot is Cursor._snapshot
+            or cursor_type._restore is Cursor._restore
         )
 
     def _require_checkpointable(self) -> None:
@@ -194,7 +194,7 @@ class IndexedCursor[T](Cursor[T]):
     def _checkpoint_key(self) -> _CheckpointKey:
         return "indexed", self._indexed_dataset.explain(), self._start, self._stop
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         position = to_index(state["position"])
         if not self._start <= position <= self._stop:
             raise ValueError("cursor position is outside the requested range")
@@ -207,7 +207,7 @@ class IndexedCursor[T](Cursor[T]):
         self._position += 1
         return value
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {"position": self._position}
 
 
@@ -226,12 +226,12 @@ class _ParentCursor[T, U](Cursor[U]):
     def _load_local_state(self, state: State) -> None:
         pass
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         self._load_local_state(state)
-        self._parent.load_state_dict(state["parent"])
+        self._parent._restore(state["parent"])
 
-    def _state_dict(self) -> State:
-        return {"parent": self._parent.state_dict(), **self._local_state()}
+    def _snapshot(self) -> State:
+        return {"parent": self._parent._snapshot(), **self._local_state()}
 
 
 class RangeCursor[T](_ParentCursor[T, T]):
@@ -280,7 +280,7 @@ class _ReadAheadCheckpoint[T]:
     def __init__(self, parent: Cursor[T]):
         self._parent = parent
         self._lock = Lock()
-        self._anchor = parent.state_dict()
+        self._anchor = parent._snapshot()
         self._anchor_position = 0
         self._produced = 0
         self._consumed = 0
@@ -290,7 +290,7 @@ class _ReadAheadCheckpoint[T]:
         self._produced += 1
         if self._produced % _READ_AHEAD_SNAPSHOT_INTERVAL:
             return
-        snapshot = self._parent.state_dict()
+        snapshot = self._parent._snapshot()
         with self._lock:
             self._snapshots.append((self._produced, snapshot))
 
@@ -300,14 +300,14 @@ class _ReadAheadCheckpoint[T]:
             while self._snapshots and self._snapshots[0][0] <= self._consumed:
                 self._anchor_position, self._anchor = self._snapshots.popleft()
 
-    def state_dict(self) -> State:
+    def snapshot(self) -> State:
         with self._lock:
             return {
                 "parent": self._anchor,
                 "replay": self._consumed - self._anchor_position,
             }
 
-    def load_state_dict(self, state: State) -> None:
+    def restore(self, state: State) -> None:
         try:
             parent_state = state["parent"]
             replay = to_index(state["replay"])
@@ -316,7 +316,7 @@ class _ReadAheadCheckpoint[T]:
         if not 0 <= replay < _READ_AHEAD_SNAPSHOT_INTERVAL:
             raise ValueError("read-ahead checkpoint has an invalid replay count")
 
-        self._parent.load_state_dict(parent_state)
+        self._parent._restore(parent_state)
         for _ in range(replay):
             try:
                 next(self._parent)
@@ -392,15 +392,15 @@ class ParallelMapCursor[T, U](Cursor[U]):
             self._checkpoint.consumed()
         return value
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         if self._checkpoint is None:
             raise TypeError(f"{type(self).__name__} is not checkpointable")
-        return self._checkpoint.state_dict()
+        return self._checkpoint.snapshot()
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         if self._checkpoint is None:
             raise TypeError(f"{type(self).__name__} is not checkpointable")
-        self._checkpoint.load_state_dict(state)
+        self._checkpoint.restore(state)
 
 
 @dataclass(slots=True)
@@ -496,15 +496,15 @@ class PrefetchCursor[T](Cursor[T]):
     def _next(self) -> T:
         return self._state.get()
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         if self._checkpoint is None:
             raise TypeError(f"{type(self).__name__} is not checkpointable")
-        return self._checkpoint.state_dict()
+        return self._checkpoint.snapshot()
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         if self._checkpoint is None:
             raise TypeError(f"{type(self).__name__} is not checkpointable")
-        self._checkpoint.load_state_dict(state)
+        self._checkpoint.restore(state)
 
 
 class _CloseSlot:
@@ -687,7 +687,7 @@ class ShuffleCursor[T](_ParentCursor[T, T]):
         self._buffer: list[T] = []
         self._parent_done = False
         self._position = 0
-        self._anchor = parent.state_dict() if parent.checkpointable else None
+        self._anchor = parent._snapshot() if parent.checkpointable else None
 
     def _next(self) -> T:
         while not self._parent_done and len(self._buffer) < self._buffer_size:
@@ -704,12 +704,12 @@ class ShuffleCursor[T](_ParentCursor[T, T]):
         self._position += 1
         return value
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         if self._anchor is None:
             raise TypeError(f"{type(self).__name__} is not checkpointable")
         return {"parent": self._anchor, "replay": self._position}
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         try:
             anchor = state["parent"]
             replay = to_index(state["replay"])
@@ -718,7 +718,7 @@ class ShuffleCursor[T](_ParentCursor[T, T]):
         if replay < 0:
             raise ValueError("shuffle checkpoint has an invalid replay count")
 
-        self._parent.load_state_dict(anchor)
+        self._parent._restore(anchor)
         self._anchor = anchor
         self._random = Random(self._seed)
         self._buffer.clear()
@@ -772,7 +772,7 @@ class RepeatCursor[T](Cursor[T]):
         self._active_resource = _CloseSlot()
         self.callback(self._active_resource.close)
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         epoch = to_index(state["epoch"])
         if (
             epoch < 0
@@ -797,7 +797,7 @@ class RepeatCursor[T](Cursor[T]):
         if active_state is not None:
             self._active = self._repeat_dataset._open_epoch(epoch)
             self._active_resource.replace(self._active)
-            self._active.load_state_dict(active_state)
+            self._active._restore(active_state)
 
     def _next(self) -> T:
         while (
@@ -821,11 +821,11 @@ class RepeatCursor[T](Cursor[T]):
                 return value
         raise StopIteration
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {
             "epoch": self._epoch,
             "yielded": self._yielded,
-            "active": None if self._active is None else self._active.state_dict(),
+            "active": None if self._active is None else self._active._snapshot(),
         }
 
 
@@ -842,7 +842,7 @@ class ConcatCursor[T](Cursor[T]):
     def checkpointable(self) -> bool:
         return all(component.checkpointable for component in self._components)
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         component = to_index(state["component"])
         active_state = state["active"]
         if not 0 <= component <= len(self._components):
@@ -853,7 +853,7 @@ class ConcatCursor[T](Cursor[T]):
         if active_state is not None:
             self._active = self._components[self._component].cursor()
             self._active_resource.replace(self._active)
-            self._active.load_state_dict(active_state)
+            self._active._restore(active_state)
 
     def _next(self) -> T:
         while self._component < len(self._components):
@@ -868,10 +868,10 @@ class ConcatCursor[T](Cursor[T]):
                 self._component += 1
         raise StopIteration
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {
             "component": self._component,
-            "active": None if self._active is None else self._active.state_dict(),
+            "active": None if self._active is None else self._active._snapshot(),
         }
 
 
@@ -898,14 +898,14 @@ class InterleaveCursor[T](Cursor[T]):
                 self._remaining -= 1
         raise StopIteration
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {
             "component": self._component,
             "active": list(self._active),
-            "parents": [cursor.state_dict() for cursor in self._cursors],
+            "parents": [cursor._snapshot() for cursor in self._cursors],
         }
 
-    def _load_state_dict(self, state: State) -> None:
+    def _restore(self, state: State) -> None:
         component = to_index(state["component"])
         active = list(state["active"])
         parents = list(state["parents"])
@@ -917,7 +917,7 @@ class InterleaveCursor[T](Cursor[T]):
         ):
             raise ValueError("interleave checkpoint has invalid state")
         for cursor, parent_state in zip(self._cursors, parents, strict=True):
-            cursor.load_state_dict(parent_state)
+            cursor._restore(parent_state)
         self._component = component
         self._active = active
         self._remaining = sum(active)
@@ -947,12 +947,12 @@ class ZipCursor[T, U](Cursor[tuple[T, U]]):
             self.close()
             raise
 
-    def _state_dict(self) -> State:
+    def _snapshot(self) -> State:
         return {
-            "left": self._left.state_dict(),
-            "right": self._right.state_dict(),
+            "left": self._left._snapshot(),
+            "right": self._right._snapshot(),
         }
 
-    def _load_state_dict(self, state: State) -> None:
-        self._left.load_state_dict(state["left"])
-        self._right.load_state_dict(state["right"])
+    def _restore(self, state: State) -> None:
+        self._left._restore(state["left"])
+        self._right._restore(state["right"])

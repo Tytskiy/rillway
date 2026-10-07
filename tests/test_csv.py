@@ -28,7 +28,7 @@ def test_csv_checkpoint_resumes_at_a_logical_record(tmp_path):
     state = cursor.state_dict()
     expected = list(cursor)
 
-    assert state["state"]["offset"] > len("name,note\n")
+    assert state["state"]["position"] > len("name,note\n")
     resumed = dataset.cursor()
     resumed.load_state_dict(state)
     assert list(resumed) == expected == [{"name": "bob", "note": "plain"}]
