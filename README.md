@@ -72,15 +72,18 @@ assert list(dataset.shard(1, 2)) == [30, 40]
 Structured files have their own datasets:
 
 ```python
-from rillway import CsvDataset, JsonlDataset
+from rillway import CsvDataset, JsonlDataset, ParquetDataset
 
 events = JsonlDataset("events.jsonl")
 people = CsvDataset("people.csv", delimiter=",")
+training = ParquetDataset("training.parquet", columns=("text", "label"))
 ```
 
-Both readers open files lazily, yield parsed records, and resume from saved
-file positions. CSV files use their first row as the column names; pass
+The readers yield parsed records and resume from saved file positions. CSV
+files use their first row as the column names; pass
 `columns=(...)` for a headerless file or `encoding=...` for non-UTF-8 text.
+Parquet support is optional; add it with
+`uv add "rillway[parquet] @ git+https://github.com/Tytskiy/rillway.git"`.
 
 Rillway keeps useful abilities when an operation allows it. Mapping an indexed
 dataset still gives you an indexed dataset. Filtering may change how many

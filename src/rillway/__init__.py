@@ -8,6 +8,7 @@ from .dataset import (
     RangeDataset,
 )
 from .jsonl import JsonlDataset, JsonValue
+from .parquet import ParquetDataset
 
 __all__ = [
     "Bounds",
@@ -21,6 +22,7 @@ __all__ = [
     "Infinite",
     "JsonValue",
     "JsonlDataset",
+    "ParquetDataset",
     "RangeDataset",
     "State",
     "Unknown",

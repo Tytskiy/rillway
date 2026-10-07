@@ -22,6 +22,11 @@ classifiers = [
 Repository = "https://github.com/Tytskiy/rillway"
 Issues = "https://github.com/Tytskiy/rillway/issues"
 
+[project.optional-dependencies]
+parquet = [
+    "pyarrow>=25.0.1",
+]
+
 [build-system]
 requires = ["uv_build>=0.11.12,<0.12"]
 build-backend = "uv_build"

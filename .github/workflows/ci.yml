@@ -34,7 +34,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked --python ${{ matrix.python-version }}
+        run: uv sync --locked --all-extras --python ${{ matrix.python-version }}
 
       - name: Verify free-threading
         if: matrix.experimental
