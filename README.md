@@ -69,6 +69,19 @@ assert list(dataset[1:3]) == [20, 30]
 assert list(dataset.shard(1, 2)) == [30, 40]
 ```
 
+Structured files have their own datasets:
+
+```python
+from rillway import CsvDataset, JsonlDataset
+
+events = JsonlDataset("events.jsonl")
+people = CsvDataset("people.csv", delimiter=",")
+```
+
+Both readers open files lazily, yield parsed records, and resume from saved
+file positions. CSV files use their first row as the column names; pass
+`columns=(...)` for a headerless file or `encoding=...` for non-UTF-8 text.
+
 Rillway keeps useful abilities when an operation allows it. Mapping an indexed
 dataset still gives you an indexed dataset. Filtering may change how many
 items remain, so its result behaves like a stream instead.
