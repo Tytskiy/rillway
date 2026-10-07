@@ -11,7 +11,7 @@ from .cardinality import Bounds, Cardinality, Exact, Infinite, Unknown
 from .cursor import Cursor
 
 if TYPE_CHECKING:
-    from .dataset import IndexedDataset, RangeDataset
+    from .dataset import Dataset, IndexedDataset, RangeDataset
 
 
 @runtime_checkable
@@ -24,7 +24,7 @@ class _Operation(Protocol):
 class _StreamOperation[T, U](_Operation, Protocol):
     def cardinality(self, parent: Cardinality) -> Cardinality: ...
 
-    def open(self, parent: Cursor[T]) -> Cursor[U]: ...
+    def open(self, dataset: Dataset[U], parent: Cursor[T]) -> Cursor[U]: ...
 
 
 @runtime_checkable
@@ -35,6 +35,7 @@ class _ExactOperation[T, U](_Operation, Protocol):
 
     def open_range(
         self,
+        dataset: RangeDataset[U],
         parent: RangeDataset[T],
         start: int,
         stop: int,
@@ -59,20 +60,25 @@ class _Map[T, U]:
     def get(self, parent: IndexedDataset[T], position: int) -> U:
         return self.fn(parent._get(position))
 
-    def open(self, parent: Cursor[T]) -> Cursor[U]:
-        return cursors.TransformCursor(parent, map(self.fn, parent), ("map", self.name))
+    def open(self, dataset: Dataset[U], parent: Cursor[T]) -> Cursor[U]:
+        return cursors.TransformCursor(
+            dataset,
+            parent,
+            map(self.fn, parent),
+        )
 
     def open_range(
         self,
+        dataset: RangeDataset[U],
         parent: RangeDataset[T],
         start: int,
         stop: int,
     ) -> Cursor[U]:
         parent_cursor = parent.open_range(start, stop)
         return cursors.TransformCursor(
+            dataset,
             parent_cursor,
             map(self.fn, parent_cursor),
-            ("map", self.name),
         )
 
 
@@ -94,8 +100,9 @@ class _ParallelMap[T, U]:
     def cardinality(self, parent: Cardinality) -> Cardinality:
         return parent
 
-    def open(self, parent: Cursor[T]) -> Cursor[U]:
+    def open(self, dataset: Dataset[U], parent: Cursor[T]) -> Cursor[U]:
         return cursors.ParallelMapCursor(
+            dataset,
             parent,
             self.fn,
             self.workers,
@@ -120,11 +127,11 @@ class _Filter[T]:
             return Bounds(0, parent.upper)
         return Unknown()
 
-    def open(self, parent: Cursor[T]) -> Cursor[T]:
+    def open(self, dataset: Dataset[T], parent: Cursor[T]) -> Cursor[T]:
         return cursors.TransformCursor(
+            dataset,
             parent,
             filter(self.predicate, parent),
-            ("filter", self.name),
         )
 
 
@@ -140,8 +147,8 @@ class _FlatMap[T, U]:
     def cardinality(self, parent: Cardinality) -> Cardinality:
         return Unknown()
 
-    def open(self, parent: Cursor[T]) -> Cursor[U]:
-        return cursors.FlatMapCursor(parent, self.fn, self.name)
+    def open(self, dataset: Dataset[U], parent: Cursor[T]) -> Cursor[U]:
+        return cursors.FlatMapCursor(dataset, parent, self.fn)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,8 +168,8 @@ class _Take[T]:
             return Exact(self.count)
         return Bounds(0, self.count)
 
-    def open(self, parent: Cursor[T]) -> Cursor[T]:
-        return cursors.TakeCursor(parent, self.count)
+    def open(self, dataset: Dataset[T], parent: Cursor[T]) -> Cursor[T]:
+        return cursors.TakeCursor(dataset, parent, self.count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,8 +190,8 @@ class _Skip[T]:
             )
         return parent
 
-    def open(self, parent: Cursor[T]) -> Cursor[T]:
-        return cursors.SkipCursor(parent, self.count)
+    def open(self, dataset: Dataset[T], parent: Cursor[T]) -> Cursor[T]:
+        return cursors.SkipCursor(dataset, parent, self.count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,11 +221,16 @@ class _Batch[T]:
         stop = min(start + self.size, len(parent))
         return tuple(parent._get(index) for index in range(start, stop))
 
-    def open(self, parent: Cursor[T]) -> Cursor[tuple[T, ...]]:
-        return cursors.BatchCursor(parent, self.size, self.drop_last)
+    def open(
+        self,
+        dataset: Dataset[tuple[T, ...]],
+        parent: Cursor[T],
+    ) -> Cursor[tuple[T, ...]]:
+        return cursors.BatchCursor(dataset, parent, self.size, self.drop_last)
 
     def open_range(
         self,
+        dataset: RangeDataset[tuple[T, ...]],
         parent: RangeDataset[T],
         start: int,
         stop: int,
@@ -226,4 +238,4 @@ class _Batch[T]:
         parent_start = start * self.size
         parent_stop = min(stop * self.size, len(parent))
         parent_cursor = parent.open_range(parent_start, parent_stop)
-        return cursors.BatchCursor(parent_cursor, self.size, self.drop_last)
+        return cursors.BatchCursor(dataset, parent_cursor, self.size, self.drop_last)

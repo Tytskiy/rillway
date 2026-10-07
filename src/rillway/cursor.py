@@ -16,7 +16,7 @@ from weakref import finalize
 from ._queue import _QueueClosed, _ThreadingQueue
 
 if TYPE_CHECKING:
-    from .dataset import Dataset, IndexedDataset
+    from .dataset import Dataset, IndexedDataset, _RepeatDataset
 
 type State = dict[str, Any]
 type _CheckpointKey = str | int | bool | tuple[_CheckpointKey, ...]
@@ -25,15 +25,21 @@ _STATE_VERSION = 1
 
 
 class Cursor[T](Iterator[T], ABC):
-    def __init__(self) -> None:
+    def __init__(self, dataset: Dataset[Any] | None = None) -> None:
+        self._dataset = dataset
         self._closed = False
         self._started = False
         self._scope = ExitStack()
         self._finalizer = finalize(self, self._scope.close)
 
     @classmethod
-    def from_iterator[U](cls, iterator: Iterator[U]) -> Cursor[U]:
-        return _IteratorCursor(iterator)
+    def from_iterator[U](
+        cls,
+        iterator: Iterator[U],
+        *,
+        dataset: Dataset[Any] | None = None,
+    ) -> Cursor[U]:
+        return _IteratorCursor(iterator, dataset)
 
     @property
     def closed(self) -> bool:
@@ -97,16 +103,24 @@ class Cursor[T](Iterator[T], ABC):
         raise TypeError(f"{type(self).__name__} is not checkpointable")
 
     def _checkpoint_key(self) -> _CheckpointKey:
+        if self._dataset is not None:
+            return "dataset", self._dataset.explain()
         cursor_type = type(self)
         return f"{cursor_type.__module__}.{cursor_type.__qualname__}"
 
-    def _require_checkpointable(self) -> None:
+    @property
+    def checkpointable(self) -> bool:
+        if self._dataset is not None:
+            return self._dataset.checkpointable
         cursor_type = type(self)
-        if (
+        return not (
             cursor_type._state_dict is Cursor._state_dict
             or cursor_type._load_state_dict is Cursor._load_state_dict
-        ):
-            raise TypeError(f"{cursor_type.__name__} is not checkpointable")
+        )
+
+    def _require_checkpointable(self) -> None:
+        if not self.checkpointable:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
 
     def _checkpoint_payload(self, checkpoint: State) -> State:
         if not isinstance(checkpoint, dict) or set(checkpoint) != {"version", "cursor", "state"}:
@@ -151,8 +165,8 @@ class Cursor[T](Iterator[T], ABC):
 
 
 class _IteratorCursor[T](Cursor[T]):
-    def __init__(self, iterator: Iterator[T]):
-        super().__init__()
+    def __init__(self, iterator: Iterator[T], dataset: Dataset[Any] | None = None):
+        super().__init__(dataset)
         self._iterator = iterator
         close = getattr(iterator, "close", None)
         if close is not None:
@@ -169,14 +183,14 @@ class IndexedCursor[T](Cursor[T]):
         start: int = 0,
         stop: int | None = None,
     ):
-        super().__init__()
-        self._dataset = dataset
+        super().__init__(dataset)
+        self._indexed_dataset = dataset
         self._start = start
         self._stop = len(dataset) if stop is None else stop
         self._position = start
 
     def _checkpoint_key(self) -> _CheckpointKey:
-        return "indexed", self._dataset.explain(), self._start, self._stop
+        return "indexed", self._indexed_dataset.explain(), self._start, self._stop
 
     def _load_state_dict(self, state: State) -> None:
         position = to_index(state["position"])
@@ -187,7 +201,7 @@ class IndexedCursor[T](Cursor[T]):
     def _next(self) -> T:
         if self._position == self._stop:
             raise StopIteration
-        value = self._dataset._get(self._position)
+        value = self._indexed_dataset._get(self._position)
         self._position += 1
         return value
 
@@ -196,9 +210,13 @@ class IndexedCursor[T](Cursor[T]):
 
 
 class _ParentCursor[T, U](Cursor[U]):
-    def __init__(self, parent: Cursor[T]):
-        super().__init__()
+    def __init__(self, dataset: Dataset[Any] | None, parent: Cursor[T]):
+        super().__init__(dataset)
         self._parent = self.enter_context(parent)
+
+    @property
+    def checkpointable(self) -> bool:
+        return super().checkpointable and self._parent.checkpointable
 
     def _local_state(self) -> State:
         return {}
@@ -215,8 +233,14 @@ class _ParentCursor[T, U](Cursor[U]):
 
 
 class RangeCursor[T](_ParentCursor[T, T]):
-    def __init__(self, parent: Cursor[T], start: int, stop: int):
-        super().__init__(parent)
+    def __init__(
+        self,
+        dataset: Dataset[T],
+        parent: Cursor[T],
+        start: int,
+        stop: int,
+    ):
+        super().__init__(dataset, parent)
         self._start = start
         self._stop = stop
 
@@ -237,13 +261,14 @@ class RangeCursor[T](_ParentCursor[T, T]):
 
 
 class TransformCursor[T, U](_ParentCursor[T, U]):
-    def __init__(self, parent: Cursor[T], iterator: Iterator[U], operation: _CheckpointKey):
-        super().__init__(parent)
+    def __init__(
+        self,
+        dataset: Dataset[U],
+        parent: Cursor[T],
+        iterator: Iterator[U],
+    ):
+        super().__init__(dataset, parent)
         self._iterator = iterator
-        self._operation = operation
-
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "transform", self._operation
 
     def _next(self) -> U:
         return next(self._iterator)
@@ -252,13 +277,14 @@ class TransformCursor[T, U](_ParentCursor[T, U]):
 class ParallelMapCursor[T, U](Cursor[U]):
     def __init__(
         self,
+        dataset: Dataset[U],
         parent: Cursor[T],
         fn: Callable[[T], U],
         workers: int,
         buffer_size: int,
         backend: str,
     ):
-        super().__init__()
+        super().__init__(dataset)
         self._parent = self.enter_context(parent)
         self._fn = fn
         self._capacity = workers + buffer_size
@@ -370,8 +396,8 @@ class _PrefetchState[T]:
 
 
 class PrefetchCursor[T](Cursor[T]):
-    def __init__(self, parent: Cursor[T], buffer_size: int):
-        super().__init__()
+    def __init__(self, dataset: Dataset[T], parent: Cursor[T], buffer_size: int):
+        super().__init__(dataset)
         self._state = _PrefetchState(parent, buffer_size)
         self.callback(self._state.close)
 
@@ -397,22 +423,18 @@ class _CloseSlot:
 class FlatMapCursor[T, U](_ParentCursor[T, U]):
     def __init__(
         self,
+        dataset: Dataset[U],
         parent: Cursor[T],
         fn: Callable[[T], Iterable[U]],
-        operation: _CheckpointKey,
     ):
-        super().__init__(parent)
+        super().__init__(dataset, parent)
         self._fn = fn
-        self._operation = operation
         self._current: T | None = None
         self._has_current = False
         self._child: Iterator[U] | None = None
         self._child_offset = 0
         self._child_resource = _CloseSlot()
         self.callback(self._child_resource.close)
-
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "flat_map", self._operation
 
     def _load_local_state(self, state: State) -> None:
         if state["has_current"]:
@@ -465,13 +487,10 @@ class FlatMapCursor[T, U](_ParentCursor[T, U]):
 
 
 class TakeCursor[T](_ParentCursor[T, T]):
-    def __init__(self, parent: Cursor[T], remaining: int):
-        super().__init__(parent)
+    def __init__(self, dataset: Dataset[T], parent: Cursor[T], remaining: int):
+        super().__init__(dataset, parent)
         self._limit = remaining
         self._remaining = remaining
-
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "take", self._limit
 
     def _next(self) -> T:
         if self._remaining == 0:
@@ -491,13 +510,10 @@ class TakeCursor[T](_ParentCursor[T, T]):
 
 
 class SkipCursor[T](_ParentCursor[T, T]):
-    def __init__(self, parent: Cursor[T], remaining: int):
-        super().__init__(parent)
+    def __init__(self, dataset: Dataset[T], parent: Cursor[T], remaining: int):
+        super().__init__(dataset, parent)
         self._limit = remaining
         self._remaining = remaining
-
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "skip", self._limit
 
     def _next(self) -> T:
         while self._remaining:
@@ -518,17 +534,15 @@ class SkipCursor[T](_ParentCursor[T, T]):
 class BatchCursor[T](_ParentCursor[T, tuple[T, ...]]):
     def __init__(
         self,
+        dataset: Dataset[tuple[T, ...]],
         parent: Cursor[T],
         size: int,
         drop_last: bool,
     ):
-        super().__init__(parent)
+        super().__init__(dataset, parent)
         self._size = size
         self._drop_last = drop_last
         self._buffer: list[T] = []
-
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "batch", self._size, self._drop_last
 
     def _next(self) -> tuple[T, ...]:
         while len(self._buffer) < self._size:
@@ -557,28 +571,22 @@ class BatchCursor[T](_ParentCursor[T, tuple[T, ...]]):
 
 
 class RepeatCursor[T](Cursor[T]):
-    def __init__(
-        self,
-        open_epoch: Callable[[int], Cursor[T]],
-        count: int | None,
-        operation: _CheckpointKey,
-    ):
-        super().__init__()
-        self._open_epoch = open_epoch
-        self._count = count
-        self._operation = operation
+    def __init__(self, dataset: _RepeatDataset[T]):
+        super().__init__(dataset)
+        self._repeat_dataset = dataset
         self._epoch = 0
         self._active: Cursor[T] | None = None
         self._yielded = False
         self._active_resource = _CloseSlot()
         self.callback(self._active_resource.close)
 
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "repeat", self._operation
-
     def _load_state_dict(self, state: State) -> None:
         epoch = to_index(state["epoch"])
-        if epoch < 0 or self._count is not None and epoch > self._count:
+        if (
+            epoch < 0
+            or self._repeat_dataset.count is not None
+            and epoch > self._repeat_dataset.count
+        ):
             raise ValueError("repeat checkpoint has an invalid epoch")
         yielded = state["yielded"]
         if type(yielded) is not bool:
@@ -586,19 +594,26 @@ class RepeatCursor[T](Cursor[T]):
         active_state = state["active"]
         if (active_state is None) == yielded:
             raise ValueError("repeat checkpoint has inconsistent active state")
-        if active_state is not None and self._count is not None and epoch == self._count:
+        if (
+            active_state is not None
+            and self._repeat_dataset.count is not None
+            and epoch == self._repeat_dataset.count
+        ):
             raise ValueError("repeat checkpoint has an invalid active epoch")
         self._epoch = epoch
         self._yielded = yielded
         if active_state is not None:
-            self._active = self._open_epoch(epoch)
+            self._active = self._repeat_dataset._open_epoch(epoch)
             self._active_resource.replace(self._active)
             self._active.load_state_dict(active_state)
 
     def _next(self) -> T:
-        while self._count is None or self._epoch < self._count:
+        while (
+            self._repeat_dataset.count is None
+            or self._epoch < self._repeat_dataset.count
+        ):
             if self._active is None:
-                self._active = self._open_epoch(self._epoch)
+                self._active = self._repeat_dataset._open_epoch(self._epoch)
                 self._active_resource.replace(self._active)
                 self._yielded = False
             try:
@@ -623,16 +638,17 @@ class RepeatCursor[T](Cursor[T]):
 
 
 class ConcatCursor[T](Cursor[T]):
-    def __init__(self, components: tuple[Dataset[T], ...]):
-        super().__init__()
+    def __init__(self, dataset: Dataset[T], components: tuple[Dataset[T], ...]):
+        super().__init__(dataset)
         self._components = components
         self._component = 0
         self._active: Cursor[T] | None = None
         self._active_resource = _CloseSlot()
         self.callback(self._active_resource.close)
 
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "concat", tuple(component.explain() for component in self._components)
+    @property
+    def checkpointable(self) -> bool:
+        return all(component.checkpointable for component in self._components)
 
     def _load_state_dict(self, state: State) -> None:
         component = to_index(state["component"])
@@ -668,15 +684,21 @@ class ConcatCursor[T](Cursor[T]):
 
 
 class ZipCursor[T, U](Cursor[tuple[T, U]]):
-    def __init__(self, left: Cursor[T], right: Cursor[U], strict: bool):
-        super().__init__()
+    def __init__(
+        self,
+        dataset: Dataset[tuple[T, U]],
+        left: Cursor[T],
+        right: Cursor[U],
+        strict: bool,
+    ):
+        super().__init__(dataset)
         self._left = self.enter_context(left)
         self._right = self.enter_context(right)
-        self._strict = strict
         self._iterator = zip(self._left, self._right, strict=strict)
 
-    def _checkpoint_key(self) -> _CheckpointKey:
-        return "zip", self._strict
+    @property
+    def checkpointable(self) -> bool:
+        return self._left.checkpointable and self._right.checkpointable
 
     def _next(self) -> tuple[T, U]:
         try:

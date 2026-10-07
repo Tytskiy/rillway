@@ -261,6 +261,7 @@ def test_factory_stream_is_lazy_replayable_and_explicitly_not_checkpointable():
     assert stream.explain() == "Factory(name='numbers') [Unknown]"
 
     cursor = stream.cursor()
+    assert not cursor.checkpointable
     with pytest.raises(TypeError, match="not checkpointable"):
         cursor.state_dict()
     restored = stream.cursor()
@@ -278,29 +279,90 @@ def test_parallel_execution_is_not_checkpointable():
     for dataset in datasets:
         assert not dataset.checkpointable
         cursor = dataset.cursor()
+        assert not cursor.checkpointable
         with pytest.raises(TypeError, match="not checkpointable"):
             cursor.state_dict()
+        with pytest.raises(TypeError, match="not checkpointable"):
+            cursor.load_state_dict({})
         cursor.close()
 
 
-def test_custom_dataset_must_opt_in_to_checkpointing():
-    class CustomDataset(Dataset[int]):
+def test_cursor_checkpointability_follows_ordinary_parent_graphs():
+    checkpointable = IndexedDataset.from_source(range(3)).filter(bool).map(str)
+    uncheckpointable = Dataset.from_factory(lambda: range(3)).map(str)
+    datasets = [
+        uncheckpointable,
+        uncheckpointable.take(1),
+        uncheckpointable.repeat(2),
+        uncheckpointable.concat(checkpointable),
+        uncheckpointable.zip(checkpointable),
+    ]
+
+    assert checkpointable.cursor().checkpointable
+    for dataset in datasets:
+        with dataset.cursor() as cursor:
+            assert not cursor.checkpointable
+
+
+def test_custom_dataset_and_cursor_define_a_checkpointable_source():
+    class CounterCursor(Cursor[int]):
+        def __init__(self, dataset: "CounterDataset"):
+            super().__init__(dataset)
+            self.dataset = dataset
+            self.position = 0
+
+        def _next(self):
+            if self.position == self.dataset.stop:
+                raise StopIteration
+            value = self.position
+            self.position += 1
+            return value
+
+        def _state_dict(self):
+            return {"position": self.position}
+
+        def _load_state_dict(self, state):
+            self.position = state["position"]
+
+    class CounterDataset(Dataset[int]):
+        supports_checkpointing = True
+
+        def __init__(self, stop):
+            self.stop = stop
+
         @property
         def cardinality(self):
-            return Unknown()
+            return Exact(self.stop)
 
         @property
         def description(self):
-            return "Custom"
+            return f"Counter(stop={self.stop})"
 
         def cursor(self):
-            return Cursor.from_iterator(iter([1]))
+            return CounterCursor(self)
 
-    class CheckpointableDataset(CustomDataset):
-        supports_checkpointing = True
+    dataset = CounterDataset(4)
+    cursor = dataset.cursor()
+    assert [next(cursor), next(cursor)] == [0, 1]
+    state = cursor.state_dict()
 
-    assert not CustomDataset().checkpointable
-    assert CheckpointableDataset().checkpointable
+    assert dataset.checkpointable
+    resumed = dataset.cursor()
+    resumed.load_state_dict(state)
+    assert list(resumed) == [2, 3]
+    assert dataset.explain() == "Counter(stop=4) [Exact(4)]"
+
+    different = CounterDataset(5).cursor()
+    with pytest.raises(ValueError, match="checkpoint does not match"):
+        different.load_state_dict(state)
+
+    class UncheckpointableCounterDataset(CounterDataset):
+        supports_checkpointing = False
+
+    uncheckpointable = UncheckpointableCounterDataset(4).cursor()
+    assert not uncheckpointable.checkpointable
+    with pytest.raises(TypeError, match="not checkpointable"):
+        uncheckpointable.state_dict()
 
 
 def test_cursor_from_iterator_is_explicitly_one_shot():
@@ -317,42 +379,6 @@ def test_cursor_state_must_be_loaded_before_iteration():
         cursor.load_state_dict({"position": 0})
 
     assert list(cursor) == [2, 3]
-
-
-def test_cursor_factory_is_the_supported_custom_stateful_entry_point():
-    class CounterCursor(Cursor[int]):
-        def __init__(self, stop):
-            super().__init__()
-            self.position = 0
-            self.stop = stop
-
-        def _next(self):
-            if self.position == self.stop:
-                raise StopIteration
-            value = self.position
-            self.position += 1
-            return value
-
-        def _state_dict(self):
-            return {"position": self.position}
-
-        def _load_state_dict(self, state):
-            self.position = state["position"]
-
-    stream = Dataset.from_cursor_factory(
-        lambda: CounterCursor(4),
-        cardinality=Exact(4),
-        name="counter",
-    )
-    cursor = stream.cursor()
-    assert [next(cursor), next(cursor)] == [0, 1]
-    state = cursor.state_dict()
-
-    assert stream.checkpointable
-    resumed = stream.cursor()
-    resumed.load_state_dict(state)
-    assert list(resumed) == [2, 3]
-    assert stream.explain() == "CursorFactory(name='counter') [Exact(4)]"
 
 
 def test_custom_cursor_can_own_contexts_and_cleanup_callbacks():

@@ -145,28 +145,6 @@ class Dataset[T](ABC):
             _callable_name(factory, name),
         )
 
-    @classmethod
-    def from_cursor_factory[U](
-        cls,
-        factory: Callable[[], Cursor[U]],
-        *,
-        cardinality: Cardinality | None = None,
-        name: str | None = None,
-    ) -> Dataset[U]:
-        """Build a checkpointable dataset from fresh stateful cursors.
-
-        The cursor implements ``_state_dict`` and ``_load_state_dict`` for its
-        local payload; the public methods add and validate checkpoint metadata.
-        """
-        if not callable(factory):
-            raise TypeError("factory must be callable")
-        return _CursorFactoryDataset(
-            factory,
-            Unknown() if cardinality is None else cardinality,
-            _callable_name(factory, name),
-        )
-
-
 class RangeDataset[T](Dataset[T], ABC):
     @property
     @abstractmethod
@@ -194,7 +172,7 @@ class RangeDataset[T](Dataset[T], ABC):
         cursor = self._open_range(start, stop)
         if not isinstance(cursor, Cursor):
             raise TypeError("range reader must return a Cursor")
-        return cursors.RangeCursor(cursor, start, stop)
+        return cursors.RangeCursor(self, cursor, start, stop)
 
     def cursor(self) -> Cursor[T]:
         return self.open_range(0, len(self))
@@ -479,14 +457,14 @@ class _RepeatRange[T](RangeDataset[T]):
     def _open_range(self, start: int, stop: int) -> Cursor[T]:
         length = len(self.parent)
         if length == 0:
-            return cursors.ConcatCursor(())
+            return cursors.ConcatCursor(self, ())
         components = []
         while start < stop:
             offset = start % length
             component_stop = min(length, offset + stop - start)
             components.append(_RangeSlice(self.parent, offset, component_stop))
             start += component_stop - offset
-        return cursors.ConcatCursor(tuple(components))
+        return cursors.ConcatCursor(self, tuple(components))
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,7 +533,7 @@ class _UnaryRange[T, U](_UnaryNode[T], RangeDataset[U]):
         start: int,
         stop: int,
     ) -> Cursor[U]:
-        return self.operation.open_range(self.parent, start, stop)
+        return self.operation.open_range(self, self.parent, start, stop)
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,7 +578,7 @@ class _ConcatRange[T](RangeDataset[T]):
                 )
             )
             position = component_stop
-        return cursors.ConcatCursor(tuple(selected))
+        return cursors.ConcatCursor(self, tuple(selected))
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,6 +607,7 @@ class _ZipRange[T, U](RangeDataset[tuple[T, U]]):
         stop: int,
     ) -> Cursor[tuple[T, U]]:
         return cursors.ZipCursor(
+            self,
             self.left.open_range(start, stop),
             self.right.open_range(start, stop),
             self.strict,
@@ -660,7 +639,7 @@ class _UnaryDataset[T, U](_UnaryNode[T], Dataset[U]):
         return self.operation.cardinality(self.parent.cardinality)
 
     def cursor(self) -> Cursor[U]:
-        return self.operation.open(self.parent.cursor())
+        return self.operation.open(self, self.parent.cursor())
 
 
 @dataclass(frozen=True, slots=True)
@@ -673,7 +652,7 @@ class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
         return self.operation.cardinality(self.parent.cardinality)
 
     def cursor(self) -> Cursor[U]:
-        return self.operation.open(self.parent.cursor())
+        return self.operation.open(self, self.parent.cursor())
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,7 +673,7 @@ class _PrefetchDataset[T](Dataset[T]):
         return f"Prefetch(buffer_size={self.buffer_size})"
 
     def cursor(self) -> Cursor[T]:
-        return cursors.PrefetchCursor(self.parent.cursor(), self.buffer_size)
+        return cursors.PrefetchCursor(self, self.parent.cursor(), self.buffer_size)
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,11 +698,7 @@ class _RepeatDataset[T](Dataset[T]):
         return _repeat_description(self.count, self.shuffle, self.seed)
 
     def cursor(self) -> Cursor[T]:
-        return cursors.RepeatCursor(
-            self._open_epoch,
-            self.count,
-            self.explain(),
-        )
+        return cursors.RepeatCursor(self)
 
     def _open_epoch(self, epoch: int) -> Cursor[T]:
         if self.shuffle:
@@ -747,30 +722,7 @@ class _FactoryDataset[T](Dataset[T]):
         return f"Factory(name={self.name!r})"
 
     def cursor(self) -> Cursor[T]:
-        return Cursor.from_iterator(iter(self.factory()))
-
-
-@dataclass(frozen=True, slots=True)
-class _CursorFactoryDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
-    factory: Callable[[], Cursor[T]]
-    _cardinality: Cardinality
-    name: str
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return self._cardinality
-
-    @property
-    def description(self) -> str:
-        return f"CursorFactory(name={self.name!r})"
-
-    def cursor(self) -> Cursor[T]:
-        cursor = self.factory()
-        if not isinstance(cursor, Cursor):
-            raise TypeError("cursor factory must return a Cursor")
-        return cursor
+        return Cursor.from_iterator(iter(self.factory()), dataset=self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -834,7 +786,7 @@ class _ConcatDataset[T](Dataset[T]):
         return f"Concat(count={len(self.components)})"
 
     def cursor(self) -> Cursor[T]:
-        return cursors.ConcatCursor(self.components)
+        return cursors.ConcatCursor(self, self.components)
 
 
 @dataclass(frozen=True, slots=True)
@@ -907,6 +859,7 @@ class _ZipDataset[T, U](Dataset[tuple[T, U]]):
 
     def cursor(self) -> Cursor[tuple[T, U]]:
         return cursors.ZipCursor(
+            self,
             self.left.cursor(),
             self.right.cursor(),
             self.strict,

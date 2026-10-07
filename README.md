@@ -130,9 +130,14 @@ resumed.load_state_dict(checkpoint)
 assert list(resumed) == [10, 20, 30, 40, 50]
 ```
 
-Use `dataset.checkpointable` to check whether a pipeline supports this.
-Checkpoints belong to the pipeline that created them; Rillway rejects a
-checkpoint when the pipeline does not match.
+Use `dataset.checkpointable` before opening a pipeline, or
+`cursor.checkpointable` after opening it. Checkpoints belong to the pipeline
+that created them; Rillway rejects a checkpoint when the pipeline does not
+match.
+
+Implement a custom checkpointable source as a `Dataset` and `Cursor` pair. The
+dataset owns immutable configuration and returns a fresh stateful cursor for
+each traversal.
 
 ## Available operations
 

@@ -206,7 +206,7 @@ def test_hdfs_checkpoint_rejects_a_different_source_or_range():
         source.open_range(3, 8),
     ]
     for resumed in mismatches:
-        with pytest.raises(ValueError, match="different HDFS source|requested range"):
+        with pytest.raises(ValueError, match="checkpoint does not match|requested range"):
             resumed.load_state_dict(checkpoint)
         assert resumed.closed
 
