@@ -347,6 +347,56 @@ def test_read_ahead_operators_remain_uncheckpointable_with_an_uncheckpointable_p
         cursor.close()
 
 
+def test_shuffle_checkpoint_replays_without_storing_buffered_values():
+    dataset = (
+        IndexedDataset.from_source(range(30))
+        .filter(lambda value: True)
+        .shuffle(5, seed=7)
+    )
+    cursor = dataset.cursor()
+    assert len([next(cursor) for _ in range(9)]) == 9
+    state = cursor.state_dict()
+    expected = list(cursor)
+
+    assert set(state["state"]) == {"parent", "replay"}
+    assert state["state"]["replay"] == 9
+    resumed = dataset.cursor()
+    resumed.load_state_dict(state)
+    assert list(resumed) == expected
+
+
+def test_interleave_checkpoint_preserves_each_parent_position():
+    left = IndexedDataset.from_source([1]).filter(bool)
+    right = IndexedDataset.from_source([10, 20, 30]).filter(bool)
+    dataset = left.interleave(right)
+    cursor = dataset.cursor()
+    assert [next(cursor), next(cursor), next(cursor)] == [1, 10, 20]
+    state = cursor.state_dict()
+    expected = list(cursor)
+
+    resumed = dataset.cursor()
+    resumed.load_state_dict(state)
+    assert list(resumed) == expected == [30]
+
+
+def test_stream_shard_and_unbatch_resume_from_consumer_progress():
+    source = IndexedDataset.from_source(range(12)).filter(lambda value: True)
+    datasets = [
+        source.shard(1, 3),
+        source.batch(3).unbatch(),
+    ]
+
+    for dataset in datasets:
+        cursor = dataset.cursor()
+        assert len([next(cursor) for _ in range(2)]) == 2
+        state = cursor.state_dict()
+        expected = list(cursor)
+
+        resumed = dataset.cursor()
+        resumed.load_state_dict(state)
+        assert list(resumed) == expected
+
+
 def test_cursor_checkpointability_follows_ordinary_parent_graphs():
     checkpointable = IndexedDataset.from_source(range(3)).filter(bool).map(str)
     uncheckpointable = Dataset.from_factory(lambda: range(3)).map(str)
@@ -520,6 +570,8 @@ def test_checkpoint_rejects_a_different_cursor_configuration():
             source.parallel_map(str, workers=2, name="string"),
         ),
         (source.prefetch(1), source.prefetch(2)),
+        (source.shuffle(2), source.shuffle(3)),
+        (source.shard(0, 2), source.shard(1, 2)),
         (source.take(4), source.take(5)),
         (source.skip(4), source.skip(5)),
         (source.batch(2), source.batch(3)),

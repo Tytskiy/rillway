@@ -8,6 +8,7 @@ from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from multiprocessing import get_context
 from operator import index as to_index
+from random import Random
 from threading import Lock, Thread, current_thread
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
@@ -671,6 +672,96 @@ class BatchCursor[T](_ParentCursor[T, tuple[T, ...]]):
         self._buffer = buffer
 
 
+class ShuffleCursor[T](_ParentCursor[T, T]):
+    def __init__(
+        self,
+        dataset: Dataset[T],
+        parent: Cursor[T],
+        buffer_size: int,
+        seed: int,
+    ):
+        super().__init__(dataset, parent)
+        self._buffer_size = buffer_size
+        self._seed = seed
+        self._random = Random(seed)
+        self._buffer: list[T] = []
+        self._parent_done = False
+        self._position = 0
+        self._anchor = parent.state_dict() if parent.checkpointable else None
+
+    def _next(self) -> T:
+        while not self._parent_done and len(self._buffer) < self._buffer_size:
+            try:
+                self._buffer.append(next(self._parent))
+            except StopIteration:
+                self._parent_done = True
+        if not self._buffer:
+            raise StopIteration
+        position = self._random.randrange(len(self._buffer))
+        value = self._buffer[position]
+        self._buffer[position] = self._buffer[-1]
+        self._buffer.pop()
+        self._position += 1
+        return value
+
+    def _state_dict(self) -> State:
+        if self._anchor is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        return {"parent": self._anchor, "replay": self._position}
+
+    def _load_state_dict(self, state: State) -> None:
+        try:
+            anchor = state["parent"]
+            replay = to_index(state["replay"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("invalid shuffle checkpoint") from error
+        if replay < 0:
+            raise ValueError("shuffle checkpoint has an invalid replay count")
+
+        self._parent.load_state_dict(anchor)
+        self._anchor = anchor
+        self._random = Random(self._seed)
+        self._buffer.clear()
+        self._parent_done = False
+        self._position = 0
+        for _ in range(replay):
+            try:
+                self._next()
+            except StopIteration as error:
+                raise ValueError("shuffle checkpoint exceeds the parent") from error
+
+
+class ShardCursor[T](_ParentCursor[T, T]):
+    def __init__(
+        self,
+        dataset: Dataset[T],
+        parent: Cursor[T],
+        index: int,
+        count: int,
+    ):
+        super().__init__(dataset, parent)
+        self._index = index
+        self._count = count
+        self._position = 0
+
+    def _next(self) -> T:
+        while True:
+            value = next(self._parent)
+            selected = self._position % self._count == self._index
+            self._position += 1
+            if selected:
+                return value
+
+    def _local_state(self) -> State:
+        return {"position": self._position}
+
+    def _load_local_state(self, state: State) -> None:
+        position = to_index(state["position"])
+        if position < 0:
+            raise ValueError("shard checkpoint has an invalid position")
+        self._position = position
+
+
 class RepeatCursor[T](Cursor[T]):
     def __init__(self, dataset: _RepeatDataset[T]):
         super().__init__(dataset)
@@ -782,6 +873,54 @@ class ConcatCursor[T](Cursor[T]):
             "component": self._component,
             "active": None if self._active is None else self._active.state_dict(),
         }
+
+
+class InterleaveCursor[T](Cursor[T]):
+    def __init__(self, dataset: Dataset[T], components: tuple[Dataset[T], ...]):
+        super().__init__(dataset)
+        self._cursors = tuple(
+            self.enter_context(component.cursor()) for component in components
+        )
+        self._active = [True] * len(self._cursors)
+        self._remaining = len(self._cursors)
+        self._component = 0
+
+    def _next(self) -> T:
+        while self._remaining:
+            component = self._component
+            self._component = (component + 1) % len(self._cursors)
+            if not self._active[component]:
+                continue
+            try:
+                return next(self._cursors[component])
+            except StopIteration:
+                self._active[component] = False
+                self._remaining -= 1
+        raise StopIteration
+
+    def _state_dict(self) -> State:
+        return {
+            "component": self._component,
+            "active": list(self._active),
+            "parents": [cursor.state_dict() for cursor in self._cursors],
+        }
+
+    def _load_state_dict(self, state: State) -> None:
+        component = to_index(state["component"])
+        active = list(state["active"])
+        parents = list(state["parents"])
+        if (
+            not 0 <= component < len(self._cursors)
+            or len(active) != len(self._cursors)
+            or any(type(value) is not bool for value in active)
+            or len(parents) != len(self._cursors)
+        ):
+            raise ValueError("interleave checkpoint has invalid state")
+        for cursor, parent_state in zip(self._cursors, parents, strict=True):
+            cursor.load_state_dict(parent_state)
+        self._component = component
+        self._active = active
+        self._remaining = sum(active)
 
 
 class ZipCursor[T, U](Cursor[tuple[T, U]]):

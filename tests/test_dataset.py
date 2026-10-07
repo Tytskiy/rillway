@@ -11,6 +11,7 @@ from rillway import (
     IndexedSource,
     Infinite,
     RangeDataset,
+    Unknown,
 )
 
 
@@ -192,6 +193,60 @@ def test_prefetch_runs_its_parent_in_the_background_and_preserves_order():
     assert list(cursor) == [1]
     assert dataset.cardinality == Exact(2)
     assert dataset.explain().startswith("Prefetch(buffer_size=1)")
+
+
+def test_stream_shuffle_is_bounded_reproducible_and_preserves_cardinality():
+    consumed = []
+
+    def factory():
+        for value in range(20):
+            consumed.append(value)
+            yield value
+
+    source = Dataset.from_factory(factory, cardinality=Exact(20))
+    shuffled = source.shuffle(4, seed=7)
+    cursor = shuffled.cursor()
+
+    first = next(cursor)
+    assert first in range(4)
+    assert consumed == [0, 1, 2, 3]
+
+    result = [first, *cursor]
+    assert sorted(result) == list(range(20))
+    assert result == list(source.shuffle(4, seed=7))
+    assert result != list(source.shuffle(4, seed=8))
+    assert shuffled.cardinality == Exact(20)
+
+
+def test_interleave_uses_round_robin_and_keeps_remaining_items():
+    left = Dataset.from_factory(lambda: iter([1, 2, 3]), cardinality=Exact(3))
+    right = Dataset.from_factory(lambda: iter([10, 20]), cardinality=Exact(2))
+    interleaved = left.interleave(right)
+
+    assert list(interleaved) == [1, 10, 2, 20, 3]
+    assert interleaved.cardinality == Exact(5)
+    assert interleaved.explain().startswith("Interleave(count=2)")
+    assert left.interleave() is left
+
+
+def test_stream_shard_selects_round_robin_partitions():
+    source = Dataset.from_factory(lambda: iter(range(10)), cardinality=Exact(10))
+    shards = [source.shard(index, 3) for index in range(3)]
+
+    assert [shard.cardinality for shard in shards] == [Exact(4), Exact(3), Exact(3)]
+    assert [list(shard) for shard in shards] == [
+        [0, 3, 6, 9],
+        [1, 4, 7],
+        [2, 5, 8],
+    ]
+
+
+def test_unbatch_flattens_each_input_iterable():
+    dataset = IndexedDataset.from_source([(1, 2), (), (3, 4, 5)]).unbatch()
+
+    assert list(dataset) == [1, 2, 3, 4, 5]
+    assert dataset.cardinality == Unknown()
+    assert dataset.explain().startswith("Unbatch()")
 
 
 def test_plan_is_inspectable():
@@ -404,7 +459,10 @@ def test_strict_zip_rejects_known_and_runtime_length_mismatches():
     assert cursor.closed
 
 
-@pytest.mark.parametrize("method,value", [("take", -1), ("skip", -1), ("batch", 0)])
+@pytest.mark.parametrize(
+    "method,value",
+    [("take", -1), ("skip", -1), ("batch", 0), ("shuffle", 0)],
+)
 def test_structural_operations_validate_counts(method, value):
     indexed = IndexedDataset.from_source([1])
     stream = indexed.filter(lambda value: True)
@@ -430,3 +488,9 @@ def test_parallel_map_validates_limits(options):
 def test_prefetch_requires_a_positive_buffer_size():
     with pytest.raises(ValueError, match="positive"):
         IndexedDataset.from_source([1]).prefetch(0)
+
+
+@pytest.mark.parametrize("index,count", [(-1, 2), (2, 2), (0, 0)])
+def test_stream_shard_validates_coordinates(index, count):
+    with pytest.raises(ValueError):
+        Dataset.from_factory(lambda: iter([1])).shard(index, count)

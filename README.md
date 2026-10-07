@@ -113,6 +113,21 @@ The default seed is `42`; pass `seed=...` when you want another order. Use
 `repeat(None)` for an endless dataset and combine it with `take()` when you
 want a fixed number of items.
 
+Use bounded shuffle for streamed data. It keeps at most `buffer_size` items
+ready and produces the same order again when given the same seed:
+
+```python
+shuffled = dataset.shuffle(buffer_size=10_000, seed=42)
+```
+
+Shuffle checkpoints keep only their starting position and output count.
+Restoring one replays the earlier shuffle work, so restore time grows with the
+number of items already consumed rather than with the buffer size.
+
+`interleave` reads datasets in round-robin order, `unbatch` flattens iterable
+items, and streamed datasets can be split into round-robin shards. Range-based
+datasets keep their contiguous, storage-friendly shards.
+
 ## Resuming work
 
 Some datasets can save their current position and continue with a new cursor.
@@ -146,14 +161,15 @@ each traversal.
 - `map`
 - `parallel_map`
 - `prefetch`
+- bounded `shuffle`
 - `filter`
 - `flat_map`
 - `take` and `skip`
-- `batch`
+- `batch` and `unbatch`
 - `repeat`, with deterministic shuffling for indexed datasets
-- `concat`
+- `concat` and `interleave`
 - `zip`
-- `shard` for datasets that can be split by range
+- `shard` for streamed and range-based datasets
 - indexing and slicing for indexed datasets
 
 ## Development

@@ -152,6 +152,23 @@ class _FlatMap[T, U]:
 
 
 @dataclass(frozen=True, slots=True)
+class _Unbatch[T]:
+    @property
+    def description(self) -> str:
+        return "Unbatch()"
+
+    def cardinality(self, parent: Cardinality) -> Cardinality:
+        return Unknown()
+
+    def open(
+        self,
+        dataset: Dataset[T],
+        parent: Cursor[Iterable[T]],
+    ) -> Cursor[T]:
+        return cursors.FlatMapCursor(dataset, parent, iter)
+
+
+@dataclass(frozen=True, slots=True)
 class _Take[T]:
     count: int
 

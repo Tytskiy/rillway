@@ -27,6 +27,7 @@ from ._operation import (
     _Skip,
     _StreamOperation,
     _Take,
+    _Unbatch,
 )
 from .cardinality import Bounds, Cardinality, Exact, Infinite, Unknown
 from .cursor import Cursor
@@ -104,6 +105,13 @@ class Dataset[T](ABC):
     def prefetch(self, buffer_size: int) -> Dataset[T]:
         return _PrefetchDataset(self, _positive("buffer_size", buffer_size))
 
+    def shuffle(self, buffer_size: int, *, seed: int = 42) -> Dataset[T]:
+        return _ShuffleDataset(
+            self,
+            _positive("buffer_size", buffer_size),
+            to_index(seed),
+        )
+
     def filter(self, predicate: Callable[[T], bool], *, name: str | None = None) -> Dataset[T]:
         return _UnaryDataset(self, _Filter(predicate, _callable_name(predicate, name)))
 
@@ -119,14 +127,26 @@ class Dataset[T](ABC):
     def batch(self, size: int, *, drop_last: bool = False) -> Dataset[tuple[T, ...]]:
         return _UnaryDataset(self, _Batch(_positive("size", size), drop_last))
 
+    def unbatch[U](self: Dataset[Iterable[U]]) -> Dataset[U]:
+        return _UnaryDataset(self, _Unbatch())
+
     def repeat(self, count: int | None) -> Dataset[T]:
         return _repeat_dataset(self, count)
 
     def concat(self, *others: Dataset[T]) -> Dataset[T]:
         return _concat_datasets(self, others)
 
+    def interleave(self, *others: Dataset[T]) -> Dataset[T]:
+        if not others:
+            return self
+        return _InterleaveDataset((self, *others))
+
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
         return _zip_datasets(self, other, strict)
+
+    def shard(self, index: int, count: int) -> Dataset[T]:
+        index, count = _validate_shard(index, count)
+        return _ShardDataset(self, index, count)
 
     @classmethod
     def from_factory[U](
@@ -144,6 +164,7 @@ class Dataset[T](ABC):
             Unknown() if cardinality is None else cardinality,
             _callable_name(factory, name),
         )
+
 
 class RangeDataset[T](Dataset[T], ABC):
     @property
@@ -471,7 +492,7 @@ class _RepeatRange[T](RangeDataset[T]):
 class _RepeatIndexed[T](IndexedDataset[T]):
     parent: IndexedDataset[T]
     count: int
-    shuffle: bool
+    shuffled: bool
     seed: int
 
     @property
@@ -484,12 +505,12 @@ class _RepeatIndexed[T](IndexedDataset[T]):
 
     @property
     def description(self) -> str:
-        return _repeat_description(self.count, self.shuffle, self.seed)
+        return _repeat_description(self.count, self.shuffled, self.seed)
 
     def _get(self, position: int) -> T:
         length = len(self.parent)
         epoch, position = divmod(position, length)
-        if self.shuffle:
+        if self.shuffled:
             position = _shuffle_position(position, length, self.seed, epoch)
         return self.parent._get(position)
 
@@ -681,12 +702,78 @@ class _PrefetchDataset[T](Dataset[T]):
 
 
 @dataclass(frozen=True, slots=True)
+class _ShuffleDataset[T](Dataset[T]):
+    supports_checkpointing = True
+
+    parent: Dataset[T]
+    buffer_size: int
+    seed: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Cardinality:
+        return self.parent.cardinality
+
+    @property
+    def description(self) -> str:
+        return f"Shuffle(buffer_size={self.buffer_size}, seed={self.seed})"
+
+    def cursor(self) -> Cursor[T]:
+        return cursors.ShuffleCursor(
+            self,
+            self.parent.cursor(),
+            self.buffer_size,
+            self.seed,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ShardDataset[T](Dataset[T]):
+    supports_checkpointing = True
+
+    parent: Dataset[T]
+    index: int
+    count: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Cardinality:
+        parent = self.parent.cardinality
+        if isinstance(parent, Exact):
+            return Exact(_strided_shard_size(parent, self.index, self.count))
+        if isinstance(parent, Bounds):
+            return Bounds(
+                _strided_shard_size(parent.lower, self.index, self.count),
+                _strided_shard_size(parent.upper, self.index, self.count),
+            )
+        return parent
+
+    @property
+    def description(self) -> str:
+        return f"Shard(index={self.index}, count={self.count})"
+
+    def cursor(self) -> Cursor[T]:
+        return cursors.ShardCursor(
+            self,
+            self.parent.cursor(),
+            self.index,
+            self.count,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _RepeatDataset[T](Dataset[T]):
     supports_checkpointing = True
 
     parent: Dataset[T]
     count: int | None
-    shuffle: bool
+    shuffled: bool
     seed: int
 
     @property
@@ -699,13 +786,13 @@ class _RepeatDataset[T](Dataset[T]):
 
     @property
     def description(self) -> str:
-        return _repeat_description(self.count, self.shuffle, self.seed)
+        return _repeat_description(self.count, self.shuffled, self.seed)
 
     def cursor(self) -> Cursor[T]:
         return cursors.RepeatCursor(self)
 
     def _open_epoch(self, epoch: int) -> Cursor[T]:
-        if self.shuffle:
+        if self.shuffled:
             assert isinstance(self.parent, IndexedDataset)
             return _ShuffledEpochIndexed(self.parent, self.seed, epoch).cursor()
         return self.parent.cursor()
@@ -767,23 +854,7 @@ class _ConcatDataset[T](Dataset[T]):
 
     @property
     def cardinality(self) -> Cardinality:
-        lower = upper = 0
-        unknown = False
-        for component in self.components:
-            cardinality = component.cardinality
-            if isinstance(cardinality, Infinite):
-                return Infinite()
-            if isinstance(cardinality, Unknown):
-                unknown = True
-            elif isinstance(cardinality, Exact):
-                lower += cardinality
-                upper += cardinality
-            else:
-                lower += cardinality.lower
-                upper += cardinality.upper
-        if unknown:
-            return Unknown()
-        return Exact(lower) if lower == upper else Bounds(lower, upper)
+        return _sum_cardinality(self.components)
 
     @property
     def description(self) -> str:
@@ -791,6 +862,28 @@ class _ConcatDataset[T](Dataset[T]):
 
     def cursor(self) -> Cursor[T]:
         return cursors.ConcatCursor(self, self.components)
+
+
+@dataclass(frozen=True, slots=True)
+class _InterleaveDataset[T](Dataset[T]):
+    supports_checkpointing = True
+
+    components: tuple[Dataset[T], ...]
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return self.components
+
+    @property
+    def cardinality(self) -> Cardinality:
+        return _sum_cardinality(self.components)
+
+    @property
+    def description(self) -> str:
+        return f"Interleave(count={len(self.components)})"
+
+    def cursor(self) -> Cursor[T]:
+        return cursors.InterleaveCursor(self, self.components)
 
 
 @dataclass(frozen=True, slots=True)
@@ -943,6 +1036,30 @@ def _repeat_cardinality(parent: Cardinality, count: int | None) -> Cardinality:
     return parent
 
 
+def _sum_cardinality(components: tuple[Dataset[Any], ...]) -> Cardinality:
+    lower = upper = 0
+    unknown = False
+    for component in components:
+        cardinality = component.cardinality
+        if isinstance(cardinality, Infinite):
+            return Infinite()
+        if isinstance(cardinality, Unknown):
+            unknown = True
+        elif isinstance(cardinality, Exact):
+            lower += cardinality
+            upper += cardinality
+        else:
+            lower += cardinality.lower
+            upper += cardinality.upper
+    if unknown:
+        return Unknown()
+    return Exact(lower) if lower == upper else Bounds(lower, upper)
+
+
+def _strided_shard_size(size: int, index: int, count: int) -> int:
+    return max(0, (size + count - index - 1) // count)
+
+
 def _repeat_description(count: int | None, shuffle: bool, seed: int) -> str:
     if shuffle:
         return f"Repeat(count={count}, shuffle=True, seed={seed})"
@@ -1002,11 +1119,16 @@ def _positive(name: str, value: int) -> int:
 
 
 def _shard_bounds(length: int, index: int, count: int) -> tuple[int, int]:
+    index, count = _validate_shard(index, count)
+    return length * index // count, length * (index + 1) // count
+
+
+def _validate_shard(index: int, count: int) -> tuple[int, int]:
     count = _positive("count", count)
     index = to_index(index)
     if not 0 <= index < count:
         raise ValueError("index must satisfy 0 <= index < count")
-    return length * index // count, length * (index + 1) // count
+    return index, count
 
 
 def _explain(dataset: Dataset[Any], prefix: str = "") -> list[str]:
