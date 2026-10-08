@@ -37,6 +37,12 @@ class FakeHfFileSystem:
         self.opened.append(path)
         return self.files[path.rsplit("/", 1)[-1]].open(mode)
 
+    def unstrip_protocol(self, path: str) -> str:
+        return f"hf://{path}"
+
+    def ukey(self, path: str) -> str:
+        return path.split("@", 1)[1].split("/", 1)[0]
+
 
 def write_records(path: Path, records: list[dict[str, object]]) -> None:
     parquet.write_table(pyarrow.Table.from_pylist(records), path, row_group_size=2)
@@ -112,6 +118,20 @@ def test_huggingface_checkpoint_resumes_across_files(
         {"id": 3, "text": "three"},
         {"id": 4, "text": "four"},
     ]
+
+
+def test_huggingface_loads_a_legacy_position_checkpoint(
+    filesystem: FakeHfFileSystem,
+) -> None:
+    dataset = HuggingFaceDataset("example/data")
+    cursor = dataset.cursor()
+    assert next(cursor) == {"id": 0, "text": "zero"}
+    checkpoint = cursor.state_dict()
+    checkpoint["state"]["parent"].pop("source")
+
+    resumed = dataset.cursor()
+    resumed.load_state_dict(checkpoint)
+    assert next(resumed) == {"id": 1, "text": "one"}
 
 
 def test_huggingface_requires_a_parquet_export(

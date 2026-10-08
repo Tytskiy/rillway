@@ -1,27 +1,19 @@
-from collections.abc import Generator, Iterable
-from contextlib import contextmanager
+from collections.abc import Iterable
 from dataclasses import dataclass
 from importlib import import_module
-from os import PathLike
-from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, ClassVar
 
-from ._file import (
-    _FileIdentity,
-    _load_file_position,
-    _open_file_identity,
-    _save_file_position,
-    _validate_open_file,
-)
+from ._file import _File, _file_identity, _FilePath
 from ._parquet import (
     _normalize_columns,
+    _parquet_fingerprint,
     _parquet_layout,
     _ParquetCursor,
     _ParquetFile,
     _read_row_groups,
 )
 from .cardinality import Exact
-from .cursor import Cursor, State
+from .cursor import Cursor
 from .dataset import RangeDataset
 
 
@@ -39,34 +31,40 @@ def _pyarrow_parquet() -> Any:
 
 @dataclass(init=False)
 class ParquetDataset(RangeDataset[dict[str, object]]):
+    _accept_legacy_position_checkpoint: ClassVar[bool] = False
+
     path: str
     columns: tuple[str, ...] | None
     _files: tuple[_ParquetFile, ...]
     _file_ends: tuple[int, ...]
     _length: int
-    _identity: _FileIdentity
+    _fingerprint: str
 
     def __init__(
         self,
-        path: str | PathLike[str],
+        path: _FilePath,
         *,
         columns: Iterable[str] | None = None,
     ):
         normalized_columns = _normalize_columns(columns)
-        normalized_path = str(Path(path).absolute())
+        source = _File.from_path(path)
         parquet_module = _pyarrow_parquet()
-        with open(normalized_path, "rb") as reader:
-            identity = _open_file_identity(reader)
-            row_groups = _read_row_groups(parquet_module, reader)
-        files = (_ParquetFile(normalized_path, row_groups),)
-        file_ends, length = _parquet_layout(files)
+        files = []
+        for file in _expand_files(source):
+            with file.open_binary() as reader:
+                identity = _file_identity(file, reader)
+                row_groups = _read_row_groups(parquet_module, reader)
+            files.append(_ParquetFile(file, identity, row_groups))
+        normalized_files = tuple(files)
+        fingerprint = _parquet_fingerprint(normalized_files)
+        file_ends, length = _parquet_layout(normalized_files)
 
-        self.path = normalized_path
+        self.path = source.uri
         self.columns = normalized_columns
-        self._files = files
+        self._files = normalized_files
         self._file_ends = file_ends
         self._length = length
-        self._identity = identity
+        self._fingerprint = fingerprint
 
     @property
     def cardinality(self) -> Exact:
@@ -86,28 +84,14 @@ class ParquetDataset(RangeDataset[dict[str, object]]):
     def _parquet_module(self) -> Any:
         return _pyarrow_parquet()
 
-    @contextmanager
-    def _open_parquet_file(
-        self,
-        file: _ParquetFile,
-    ) -> Generator[BinaryIO]:
-        with open(file.path, "rb") as reader:
-            _validate_open_file(reader, self._identity)
-            yield reader
 
-    def _snapshot_parquet(self, position: int) -> State:
-        state, _ = _save_file_position(
-            self.path,
-            None,
-            self._identity,
-            position,
-        )
-        return state
-
-    def _restore_parquet(self, state: State, start: int, stop: int) -> int:
-        position, identity = _load_file_position(state, self.path)
-        if not start <= position <= stop:
-            raise ValueError("Parquet checkpoint position is outside the requested range")
-        if identity != self._identity:
-            raise ValueError("Parquet checkpoint belongs to a different source file")
-        return position
+def _expand_files(source: _File) -> tuple[_File, ...]:
+    if not any(character in source.path for character in "*?["):
+        return (source,)
+    paths = sorted(source.filesystem.glob(source.path))
+    if not paths:
+        raise FileNotFoundError(f"no files match {source.uri!r}")
+    return tuple(
+        _File.from_filesystem(source.filesystem, path)
+        for path in paths
+    )

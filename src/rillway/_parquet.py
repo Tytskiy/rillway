@@ -1,14 +1,17 @@
 from collections.abc import Generator, Iterable
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Any, BinaryIO, Protocol, cast
+from hashlib import sha256
+from operator import index as to_index
+from typing import Any, BinaryIO, ClassVar, Protocol, cast
 
+from ._file import _File, _FileIdentity, _validate_file
 from .cursor import Cursor, State
 
 
 @dataclass(frozen=True)
 class _ParquetFile:
-    path: str
+    source: _File
+    identity: _FileIdentity
     row_groups: tuple[int, ...]
 
     @property
@@ -20,17 +23,10 @@ class _ParquetSource(Protocol):
     columns: tuple[str, ...] | None
     _files: tuple[_ParquetFile, ...]
     _file_ends: tuple[int, ...]
+    _fingerprint: str
+    _accept_legacy_position_checkpoint: ClassVar[bool]
 
     def _parquet_module(self) -> Any: ...
-
-    def _open_parquet_file(
-        self,
-        file: _ParquetFile,
-    ) -> AbstractContextManager[BinaryIO]: ...
-
-    def _snapshot_parquet(self, position: int) -> State: ...
-
-    def _restore_parquet(self, state: State, start: int, stop: int) -> int: ...
 
 
 def _normalize_columns(columns: Iterable[str] | None) -> tuple[str, ...] | None:
@@ -68,6 +64,22 @@ def _parquet_layout(
         length += file.length
         file_ends.append(length)
     return tuple(file_ends), length
+
+
+def _parquet_fingerprint(files: Iterable[_ParquetFile]) -> str:
+    digest = sha256()
+    for file in files:
+        digest.update(file.source.uri.encode())
+        digest.update(b"\0")
+        digest.update(repr(file.identity).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def _parquet_path_fingerprint(files: Iterable[_ParquetFile]) -> str:
+    return sha256(
+        "\0".join(file.source.path for file in files).encode()
+    ).hexdigest()[:16]
 
 
 class _ParquetCursor(Cursor[dict[str, object]]):
@@ -121,7 +133,8 @@ class _ParquetCursor(Cursor[dict[str, object]]):
         first, offset = _locate(file, start)
         last, _ = _locate(file, stop - 1)
         remaining = stop - start
-        with self._source._open_parquet_file(file) as reader:
+        with file.source.open_binary() as reader:
+            _validate_file(file.source, file.identity, reader)
             parquet_file = parquet.ParquetFile(reader)
             try:
                 batches = parquet_file.iter_batches(
@@ -146,14 +159,51 @@ class _ParquetCursor(Cursor[dict[str, object]]):
                 parquet_file.close()
 
     def _snapshot(self) -> State:
-        return self._source._snapshot_parquet(self._position)
+        self._validate_position_file(RuntimeError)
+        return {
+            "position": self._position,
+            "source": self._source._fingerprint,
+        }
 
     def _restore(self, state: State) -> None:
-        self._position = self._source._restore_parquet(
-            state,
-            self._start,
-            self._stop,
+        try:
+            position = to_index(state["position"])
+        except (KeyError, TypeError) as error:
+            raise ValueError("invalid Parquet checkpoint") from error
+        fingerprint = state.get("source")
+        legacy_identity = (
+            self._source._files[0].identity
+            if len(self._source._files) == 1
+            else None
         )
+        if fingerprint is None:
+            if not self._source._accept_legacy_position_checkpoint:
+                raise ValueError("invalid Parquet checkpoint")
+        elif (
+            fingerprint != self._source._fingerprint
+            and fingerprint != legacy_identity
+        ):
+            raise ValueError("Parquet checkpoint belongs to a different source")
+        if not self._start <= position <= self._stop:
+            raise ValueError("Parquet checkpoint position is outside the requested range")
+        self._position = position
+        self._validate_position_file(ValueError)
+
+    def _validate_position_file(self, error_type: type[Exception]) -> None:
+        if self._position == self._stop:
+            return
+        for file, file_stop in zip(
+            self._source._files,
+            self._source._file_ends,
+            strict=True,
+        ):
+            if self._position < file_stop:
+                try:
+                    _validate_file(file.source, file.identity)
+                except ValueError as error:
+                    raise error_type("source file changed") from error
+                return
+        raise RuntimeError("Parquet metadata does not cover the requested range")
 
 
 def _locate(file: _ParquetFile, position: int) -> tuple[int, int]:

@@ -1,6 +1,24 @@
 import pytest
+from upath import UPath
 
 from rillway import CsvDataset, Unknown
+
+
+def test_csv_reads_a_configured_upath():
+    root = UPath("memory://rillway-tests/csv", auto_mkdir=True)
+    path = root / "records.csv"
+    path.write_text("name\nalice\nbob\n", encoding="utf-8")
+
+    dataset = CsvDataset(path)
+    cursor = dataset.cursor()
+
+    assert next(cursor) == {"name": "alice"}
+    checkpoint = cursor.state_dict()
+    resumed = dataset.cursor()
+    resumed.load_state_dict(checkpoint)
+    assert list(resumed) == [{"name": "bob"}]
+    assert "memory://rillway-tests/csv/records.csv" in dataset.explain()
+    assert "auto_mkdir" not in dataset.explain()
 
 
 def test_csv_is_lazy_replayable_and_uses_its_header(tmp_path):

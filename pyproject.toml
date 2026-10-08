@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = []
+dependencies = [
+    "universal-pathlib>=0.3.10,<0.4",
+]
 keywords = ["data-loading", "datasets", "machine-learning"]
 classifiers = [
     "Development Status :: 3 - Alpha",

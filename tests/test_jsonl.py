@@ -1,8 +1,48 @@
 import json
 
 import pytest
+from upath import UPath
 
 from rillway import JsonlDataset, Unknown
+
+
+def test_jsonl_reads_and_resumes_an_fsspec_url():
+    path = UPath("memory://rillway-tests/jsonl/records.jsonl")
+    path.write_text('{"id": 1}\n{"id": 2}\n', encoding="utf-8")
+    dataset = JsonlDataset(str(path))
+    cursor = dataset.cursor()
+
+    assert next(cursor) == {"id": 1}
+    checkpoint = cursor.state_dict()
+
+    resumed = dataset.cursor()
+    resumed.load_state_dict(checkpoint)
+    assert list(resumed) == [{"id": 2}]
+
+
+def test_jsonl_requires_a_stable_filesystem_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = UPath("memory://rillway-tests/jsonl/no-identity.jsonl")
+    path.write_text('{"id": 1}\n', encoding="utf-8")
+    monkeypatch.setattr(path.fs, "ukey", lambda path: None)
+    cursor = JsonlDataset(path).cursor()
+
+    with pytest.raises(TypeError, match="stable file identities"):
+        next(cursor)
+    assert cursor.closed
+
+
+def test_jsonl_redacts_credentials_from_its_description():
+    dataset = JsonlDataset(
+        "memory://user:password@bucket/events.jsonl?token=secret#fragment-secret"
+    )
+
+    assert dataset.path == "memory://bucket/events.jsonl?<redacted>#<redacted>"
+    assert "password" not in dataset.explain()
+    assert "secret" not in dataset.explain()
+    assert "password" not in repr(dataset)
+    assert "secret" not in repr(dataset)
 
 
 def test_jsonl_is_lazy_replayable_and_structured(tmp_path):
@@ -29,6 +69,7 @@ def test_jsonl_checkpoint_uses_byte_offset(tmp_path):
 
     assert state["state"]["position"] == len(first.encode())
     assert "source" in state["state"]
+    assert isinstance(state["state"]["source"], tuple)
     resumed = dataset.cursor()
     resumed.load_state_dict(state)
     assert list(resumed) == expected == [{"text": "β"}]

@@ -86,6 +86,25 @@ hub = HuggingFaceDataset(
 The readers yield parsed records and resume from saved file positions. CSV
 files use their first row as the column names; pass
 `columns=(...)` for a headerless file or `encoding=...` for non-UTF-8 text.
+They also understand paths backed by fsspec. Use `UPath` when a filesystem
+needs configuration, and reuse the configured root across datasets:
+
+```python
+from upath import UPath
+
+root = UPath("s3://training-bucket/data", profile="training")
+
+events = JsonlDataset(root / "events.jsonl")
+training = ParquetDataset(root / "train" / "*.parquet")
+```
+
+Install the backend needed by the URL, such as `s3fs` for S3 or `gcsfs` for
+Google Cloud Storage. Plain local paths and URLs that need no additional
+settings can be passed directly. Filesystems must provide a stable `ukey()` so
+Rillway can detect changed sources when resuming; immutable or versioned URLs
+provide the strongest guarantee. Put credentials in `UPath` options rather
+than in the URL so they cannot appear in descriptions or checkpoints.
+
 Parquet support is optional; add it with
 `uv add "rillway[parquet] @ git+https://github.com/Tytskiy/rillway.git"`.
 Hugging Face support is optional; add it with

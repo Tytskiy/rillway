@@ -1,15 +1,15 @@
 import csv
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from os import PathLike
-from pathlib import Path
 from typing import TextIO
 
 from ._file import (
+    _File,
     _FileIdentity,
+    _FilePath,
     _load_file_position,
     _save_file_position,
-    _validate_open_file,
+    _validate_file,
 )
 from .cardinality import Cardinality, Unknown
 from .cursor import Cursor, State
@@ -22,10 +22,11 @@ class CsvDataset(Dataset[dict[str, str]]):
     delimiter: str
     columns: tuple[str, ...] | None
     encoding: str
+    _file: _File
 
     def __init__(
         self,
-        path: str | PathLike[str],
+        path: _FilePath,
         *,
         delimiter: str = ",",
         columns: Iterable[str] | None = None,
@@ -49,10 +50,12 @@ class CsvDataset(Dataset[dict[str, str]]):
             raise TypeError("encoding must be a string")
         if not encoding:
             raise ValueError("encoding must not be empty")
-        self.path = str(Path(path).absolute())
+        file = _File.from_path(path)
+        self.path = file.uri
         self.delimiter = delimiter
         self.columns = normalized_columns
         self.encoding = encoding
+        self._file = file
 
     @property
     def cardinality(self) -> Cardinality:
@@ -91,13 +94,16 @@ class _CsvCursor(Cursor[dict[str, str]]):
         self._identity: _FileIdentity | None = None
 
     def _open(self) -> None:
-        self._reader = open(
-            self._csv_dataset.path,
+        self._reader = self._csv_dataset._file.open_text(
             encoding=self._csv_dataset.encoding,
             newline="",
         )
         self.callback(self._reader.close)
-        self._identity = _validate_open_file(self._reader, self._identity)
+        self._identity = _validate_file(
+            self._csv_dataset._file,
+            self._identity,
+            self._reader,
+        )
         rows = csv.reader(_CsvLines(self._reader), delimiter=self._csv_dataset.delimiter)
         if self._csv_dataset.columns is None:
             try:
@@ -127,7 +133,7 @@ class _CsvCursor(Cursor[dict[str, str]]):
 
     def _snapshot(self) -> State:
         state, self._identity = _save_file_position(
-            self._csv_dataset.path,
+            self._csv_dataset._file,
             self._reader,
             self._identity,
             self._offset,
@@ -137,5 +143,5 @@ class _CsvCursor(Cursor[dict[str, str]]):
     def _restore(self, state: State) -> None:
         self._offset, self._identity = _load_file_position(
             state,
-            self._csv_dataset.path,
+            self._csv_dataset._file,
         )

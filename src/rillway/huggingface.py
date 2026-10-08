@@ -1,20 +1,19 @@
-from collections.abc import Generator, Iterable
-from contextlib import contextmanager
+from collections.abc import Iterable
 from dataclasses import dataclass
-from hashlib import sha256
 from importlib import import_module
-from operator import index as to_index
-from typing import Any, BinaryIO, cast
+from typing import Any, ClassVar
 
+from ._file import _File, _file_identity
 from ._parquet import (
     _normalize_columns,
     _parquet_layout,
+    _parquet_path_fingerprint,
     _ParquetCursor,
     _ParquetFile,
     _read_row_groups,
 )
 from .cardinality import Exact
-from .cursor import Cursor, State
+from .cursor import Cursor
 from .dataset import RangeDataset
 
 
@@ -44,6 +43,8 @@ def _pyarrow_parquet() -> Any:
 
 @dataclass(init=False)
 class HuggingFaceDataset(RangeDataset[dict[str, object]]):
+    _accept_legacy_position_checkpoint: ClassVar[bool] = True
+
     repo_id: str
     config: str
     split: str
@@ -92,14 +93,14 @@ class HuggingFaceDataset(RangeDataset[dict[str, object]]):
                 raise RuntimeError(f"Hugging Face did not provide a revision for {path!r}")
             resolved = filesystem.resolve_path(path)
             pinned_path = f"datasets/{repo_id}@{commit}/{resolved.path_in_repo}"
-            with cast(BinaryIO, filesystem.open(pinned_path, "rb")) as reader:
+            source = _File.from_filesystem(filesystem, pinned_path)
+            with source.open_binary() as reader:
+                identity = _file_identity(source, reader)
                 row_groups = _read_row_groups(parquet, reader)
-            files.append(_ParquetFile(pinned_path, row_groups))
+            files.append(_ParquetFile(source, identity, row_groups))
 
         file_ends, length = _parquet_layout(files)
-        fingerprint = sha256(
-            "\0".join(file.path for file in files).encode()
-        ).hexdigest()[:16]
+        fingerprint = _parquet_path_fingerprint(files)
 
         self.repo_id = repo_id
         self.config = config
@@ -132,24 +133,3 @@ class HuggingFaceDataset(RangeDataset[dict[str, object]]):
 
     def _parquet_module(self) -> Any:
         return _pyarrow_parquet()
-
-    @contextmanager
-    def _open_parquet_file(
-        self,
-        file: _ParquetFile,
-    ) -> Generator[BinaryIO]:
-        filesystem = _huggingface_filesystem()
-        with cast(BinaryIO, filesystem.open(file.path, "rb")) as reader:
-            yield reader
-
-    def _snapshot_parquet(self, position: int) -> State:
-        return {"position": position}
-
-    def _restore_parquet(self, state: State, start: int, stop: int) -> int:
-        try:
-            position = to_index(state["position"])
-        except (KeyError, TypeError) as error:
-            raise ValueError("invalid Hugging Face checkpoint") from error
-        if not start <= position <= stop:
-            raise ValueError("Hugging Face checkpoint position is outside the requested range")
-        return position

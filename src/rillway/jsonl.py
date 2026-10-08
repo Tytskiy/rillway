@@ -1,14 +1,14 @@
 import json
 from dataclasses import dataclass
-from os import PathLike
-from pathlib import Path
 from typing import BinaryIO, cast
 
 from ._file import (
+    _File,
     _FileIdentity,
+    _FilePath,
     _load_file_position,
     _save_file_position,
-    _validate_open_file,
+    _validate_file,
 )
 from .cardinality import Cardinality, Unknown
 from .cursor import Cursor, State
@@ -20,9 +20,12 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 @dataclass(init=False)
 class JsonlDataset(Dataset[JsonValue]):
     path: str
+    _file: _File
 
-    def __init__(self, path: str | PathLike[str]):
-        self.path = str(Path(path).absolute())
+    def __init__(self, path: _FilePath):
+        file = _File.from_path(path)
+        self.path = file.uri
+        self._file = file
 
     @property
     def cardinality(self) -> Cardinality:
@@ -46,9 +49,13 @@ class _JsonlCursor(Cursor[JsonValue]):
 
     def _next(self) -> JsonValue:
         if self._reader is None:
-            self._reader = open(self._jsonl_dataset.path, "rb")
+            self._reader = self._jsonl_dataset._file.open_binary()
             self.callback(self._reader.close)
-            self._identity = _validate_open_file(self._reader, self._identity)
+            self._identity = _validate_file(
+                self._jsonl_dataset._file,
+                self._identity,
+                self._reader,
+            )
             self._reader.seek(self._offset)
         line = self._reader.readline()
         if not line:
@@ -58,7 +65,7 @@ class _JsonlCursor(Cursor[JsonValue]):
 
     def _snapshot(self) -> State:
         state, self._identity = _save_file_position(
-            self._jsonl_dataset.path,
+            self._jsonl_dataset._file,
             self._reader,
             self._identity,
             self._offset,
@@ -68,5 +75,5 @@ class _JsonlCursor(Cursor[JsonValue]):
     def _restore(self, state: State) -> None:
         self._offset, self._identity = _load_file_position(
             state,
-            self._jsonl_dataset.path,
+            self._jsonl_dataset._file,
         )
