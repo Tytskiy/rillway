@@ -72,11 +72,15 @@ assert list(dataset.shard(1, 2)) == [30, 40]
 Structured files have their own datasets:
 
 ```python
-from rillway import CsvDataset, JsonlDataset, ParquetDataset
+from rillway import CsvDataset, HuggingFaceDataset, JsonlDataset, ParquetDataset
 
 events = JsonlDataset("events.jsonl")
 people = CsvDataset("people.csv", delimiter=",")
 training = ParquetDataset("training.parquet", columns=("text", "label"))
+hub = HuggingFaceDataset(
+    "cornell-movie-review-data/rotten_tomatoes",
+    columns=("text", "label"),
+)
 ```
 
 The readers yield parsed records and resume from saved file positions. CSV
@@ -84,6 +88,12 @@ files use their first row as the column names; pass
 `columns=(...)` for a headerless file or `encoding=...` for non-UTF-8 text.
 Parquet support is optional; add it with
 `uv add "rillway[parquet] @ git+https://github.com/Tytskiy/rillway.git"`.
+Hugging Face support is optional; add it with
+`uv add "rillway[huggingface] @ git+https://github.com/Tytskiy/rillway.git"`.
+It reads the Hub's Parquet exports through `HfFileSystem`, pins every file to a
+commit, and provides exact cardinality and range access without downloading
+the complete dataset. Values come directly from Parquet; Hugging Face media
+decoders are not applied.
 
 Rillway keeps useful abilities when an operation allows it. Mapping an indexed
 dataset still gives you an indexed dataset. Filtering may change how many

@@ -1,9 +1,10 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from os import PathLike
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO
 
 from ._file import (
     _FileIdentity,
@@ -11,6 +12,13 @@ from ._file import (
     _open_file_identity,
     _save_file_position,
     _validate_open_file,
+)
+from ._parquet import (
+    _normalize_columns,
+    _parquet_layout,
+    _ParquetCursor,
+    _ParquetFile,
+    _read_row_groups,
 )
 from .cardinality import Exact
 from .cursor import Cursor, State
@@ -33,8 +41,9 @@ def _pyarrow_parquet() -> Any:
 class ParquetDataset(RangeDataset[dict[str, object]]):
     path: str
     columns: tuple[str, ...] | None
+    _files: tuple[_ParquetFile, ...]
+    _file_ends: tuple[int, ...]
     _length: int
-    _row_groups: tuple[int, ...]
     _identity: _FileIdentity
 
     def __init__(
@@ -43,36 +52,20 @@ class ParquetDataset(RangeDataset[dict[str, object]]):
         *,
         columns: Iterable[str] | None = None,
     ):
-        if isinstance(columns, str):
-            raise TypeError("columns must be an iterable of strings")
-        normalized_columns = None if columns is None else tuple(columns)
-        if normalized_columns is not None:
-            if not normalized_columns:
-                raise ValueError("columns must not be empty")
-            if any(not isinstance(column, str) for column in normalized_columns):
-                raise TypeError("columns must contain only strings")
-            if len(set(normalized_columns)) != len(normalized_columns):
-                raise ValueError("columns must be unique")
-
+        normalized_columns = _normalize_columns(columns)
         normalized_path = str(Path(path).absolute())
         parquet_module = _pyarrow_parquet()
         with open(normalized_path, "rb") as reader:
             identity = _open_file_identity(reader)
-            parquet_file = parquet_module.ParquetFile(reader)
-            try:
-                metadata = parquet_file.metadata
-                row_groups = tuple(
-                    metadata.row_group(index).num_rows
-                    for index in range(metadata.num_row_groups)
-                )
-                length = metadata.num_rows
-            finally:
-                parquet_file.close()
+            row_groups = _read_row_groups(parquet_module, reader)
+        files = (_ParquetFile(normalized_path, row_groups),)
+        file_ends, length = _parquet_layout(files)
 
         self.path = normalized_path
         self.columns = normalized_columns
+        self._files = files
+        self._file_ends = file_ends
         self._length = length
-        self._row_groups = row_groups
         self._identity = identity
 
     @property
@@ -90,81 +83,31 @@ class ParquetDataset(RangeDataset[dict[str, object]]):
     ) -> Cursor[dict[str, object]]:
         return _ParquetCursor(self, start, stop)
 
+    def _parquet_module(self) -> Any:
+        return _pyarrow_parquet()
 
-class _ParquetCursor(Cursor[dict[str, object]]):
-    def __init__(self, dataset: ParquetDataset, start: int, stop: int):
-        super().__init__()
-        self._parquet_dataset = dataset
-        self._start = start
-        self._stop = stop
-        self._position = start
-        self._rows: Iterator[dict[str, object]] | None = None
-        self._reader: BinaryIO | None = None
+    @contextmanager
+    def _open_parquet_file(
+        self,
+        file: _ParquetFile,
+    ) -> Generator[BinaryIO]:
+        with open(file.path, "rb") as reader:
+            _validate_open_file(reader, self._identity)
+            yield reader
 
-    def _open(self) -> None:
-        reader = open(self._parquet_dataset.path, "rb")
-        self.callback(reader.close)
-        _validate_open_file(reader, self._parquet_dataset._identity)
-
-        parquet_file = _pyarrow_parquet().ParquetFile(reader)
-        self.callback(parquet_file.close)
-        first, offset = self._locate(self._position)
-        last, _ = self._locate(self._stop - 1)
-        batches = parquet_file.iter_batches(
-            row_groups=list(range(first, last + 1)),
-            columns=(
-                None
-                if self._parquet_dataset.columns is None
-                else list(self._parquet_dataset.columns)
-            ),
-        )
-        self._rows = self._iter_rows(batches, offset)
-        self._reader = reader
-
-    def _locate(self, position: int) -> tuple[int, int]:
-        row_group_start = 0
-        for index, size in enumerate(self._parquet_dataset._row_groups):
-            if position < row_group_start + size:
-                return index, position - row_group_start
-            row_group_start += size
-        raise RuntimeError("Parquet metadata does not cover the requested range")
-
-    @staticmethod
-    def _iter_rows(batches: Iterable[Any], skip: int) -> Iterator[dict[str, object]]:
-        for batch in batches:
-            rows = cast(list[dict[str, object]], batch.to_pylist())
-            for row in rows:
-                if skip:
-                    skip -= 1
-                else:
-                    yield row
-
-    def _next(self) -> dict[str, object]:
-        if self._position == self._stop:
-            raise StopIteration
-        if self._rows is None:
-            self._open()
-        assert self._rows is not None
-        try:
-            row = next(self._rows)
-        except StopIteration as error:
-            raise RuntimeError("Parquet range ended before its declared stop") from error
-        self._position += 1
-        return row
-
-    def _snapshot(self) -> State:
+    def _snapshot_parquet(self, position: int) -> State:
         state, _ = _save_file_position(
-            self._parquet_dataset.path,
-            self._reader,
-            self._parquet_dataset._identity,
-            self._position,
+            self.path,
+            None,
+            self._identity,
+            position,
         )
         return state
 
-    def _restore(self, state: State) -> None:
-        position, identity = _load_file_position(state, self._parquet_dataset.path)
-        if not self._start <= position <= self._stop:
+    def _restore_parquet(self, state: State, start: int, stop: int) -> int:
+        position, identity = _load_file_position(state, self.path)
+        if not start <= position <= stop:
             raise ValueError("Parquet checkpoint position is outside the requested range")
-        if identity != self._parquet_dataset._identity:
+        if identity != self._identity:
             raise ValueError("Parquet checkpoint belongs to a different source file")
-        self._position = position
+        return position

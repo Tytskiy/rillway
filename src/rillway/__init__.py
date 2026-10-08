@@ -7,6 +7,7 @@ from .dataset import (
     IndexedSource,
     RangeDataset,
 )
+from .huggingface import HuggingFaceDataset
 from .jsonl import JsonlDataset, JsonValue
 from .parquet import ParquetDataset
 
@@ -17,6 +18,7 @@ __all__ = [
     "CsvDataset",
     "Dataset",
     "Exact",
+    "HuggingFaceDataset",
     "IndexedDataset",
     "IndexedSource",
     "Infinite",
