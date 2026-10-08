@@ -1,5 +1,8 @@
+from ._readers.csv import CsvDataset
+from ._readers.huggingface import HuggingFaceDataset
+from ._readers.jsonl import JsonlDataset, JsonValue
+from ._readers.parquet import ParquetDataset
 from .cardinality import Bounds, Cardinality, Exact, Infinite, Unknown
-from .csv import CsvDataset
 from .cursor import Cursor, State
 from .dataset import (
     Dataset,
@@ -7,9 +10,6 @@ from .dataset import (
     IndexedSource,
     RangeDataset,
 )
-from .huggingface import HuggingFaceDataset
-from .jsonl import JsonlDataset, JsonValue
-from .parquet import ParquetDataset
 
 __all__ = [
     "Bounds",

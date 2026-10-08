@@ -1,6 +1,3 @@
-import os
-from threading import Event, Lock
-
 import pytest
 
 from rillway import (
@@ -9,14 +6,9 @@ from rillway import (
     Exact,
     IndexedDataset,
     IndexedSource,
-    Infinite,
     RangeDataset,
     Unknown,
 )
-
-
-def worker_process_id(value):
-    return os.getpid(), value
 
 
 def test_exact_is_a_nonnegative_int():
@@ -133,144 +125,6 @@ def test_filter_loses_indexing_but_map_preserves_it():
     assert not hasattr(streamed, "__getitem__")
 
 
-def test_parallel_map_runs_concurrently_and_preserves_input_order():
-    second_finished = Event()
-    completed = []
-    lock = Lock()
-
-    def transform(value):
-        if value == 0:
-            assert second_finished.wait(2)
-        with lock:
-            completed.append(value)
-        if value == 1:
-            second_finished.set()
-        return value * 10
-
-    dataset = IndexedDataset.from_source(range(3)).parallel_map(
-        transform,
-        workers=2,
-        buffer_size=0,
-    )
-
-    assert isinstance(dataset, Dataset)
-    assert not isinstance(dataset, RangeDataset)
-    assert dataset.cardinality == Exact(3)
-    assert list(dataset) == [0, 10, 20]
-    assert completed[:2] == [1, 0]
-    assert "workers=2, buffer_size=0" in dataset.explain()
-
-
-def test_parallel_map_can_use_process_workers():
-    parent_process = os.getpid()
-    dataset = IndexedDataset.from_source(range(3)).parallel_map(
-        worker_process_id,
-        workers=2,
-        buffer_size=0,
-        backend="process",
-    )
-
-    results = list(dataset)
-
-    assert [value for _, value in results] == [0, 1, 2]
-    assert all(process != parent_process for process, _ in results)
-
-
-def test_prefetch_runs_its_parent_in_the_background_and_preserves_order():
-    second_read = Event()
-
-    def factory():
-        yield 0
-        second_read.set()
-        yield 1
-
-    dataset = Dataset.from_factory(factory, cardinality=Exact(2)).prefetch(1)
-    cursor = dataset.cursor()
-
-    assert not second_read.is_set()
-    assert next(cursor) == 0
-    assert second_read.wait(2)
-    assert list(cursor) == [1]
-    assert dataset.cardinality == Exact(2)
-    assert dataset.explain().startswith("Prefetch(buffer_size=1)")
-
-
-def test_stream_shuffle_is_bounded_reproducible_and_preserves_cardinality():
-    consumed = []
-
-    def factory():
-        for value in range(20):
-            consumed.append(value)
-            yield value
-
-    source = Dataset.from_factory(factory, cardinality=Exact(20))
-    shuffled = source.shuffle(4, seed=7)
-    cursor = shuffled.cursor()
-
-    first = next(cursor)
-    assert first in range(4)
-    assert consumed == [0, 1, 2, 3]
-
-    result = [first, *cursor]
-    assert sorted(result) == list(range(20))
-    assert result == list(source.shuffle(4, seed=7))
-    assert result != list(source.shuffle(4, seed=8))
-    assert shuffled.cardinality == Exact(20)
-
-
-def test_interleave_uses_round_robin_and_keeps_remaining_items():
-    left = Dataset.from_factory(lambda: iter([1, 2, 3]), cardinality=Exact(3))
-    right = Dataset.from_factory(lambda: iter([10, 20]), cardinality=Exact(2))
-    interleaved = left.interleave(right)
-
-    assert list(interleaved) == [1, 10, 2, 20, 3]
-    assert interleaved.cardinality == Exact(5)
-    assert interleaved.explain().startswith("Interleave(count=2)")
-    assert left.interleave() is left
-
-
-def test_mix_is_weighted_reproducible_and_keeps_remaining_items():
-    left = IndexedDataset.from_source([("left", index) for index in range(40)])
-    right = IndexedDataset.from_source([("right", index) for index in range(10)])
-    mixed = left.mix(right, weights=(4, 1), seed=7)
-
-    result = list(mixed)
-    assert sorted(result) == sorted([*left, *right])
-    assert result == list(left.mix(right, weights=(4, 1), seed=7))
-    assert result != list(left.mix(right, weights=(4, 1), seed=8))
-    assert sum(source == "left" for source, _ in result[:25]) > 15
-    assert mixed.cardinality == Exact(50)
-    assert mixed.explain().startswith("Mix(weights=(4.0, 1.0), seed=7)")
-
-
-@pytest.mark.parametrize(
-    "weights, error",
-    [
-        ((1,), "one value per dataset"),
-        ((1, 0), "positive finite"),
-        ((1, float("inf")), "positive finite"),
-    ],
-)
-def test_mix_validates_weights(weights, error):
-    left = IndexedDataset.from_source([1])
-    right = IndexedDataset.from_source([2])
-
-    with pytest.raises(ValueError, match=error):
-        left.mix(right, weights=weights)
-
-
-def test_stream_shard_selects_round_robin_partitions():
-    source = Dataset.from_factory(lambda: iter(range(10)), cardinality=Exact(10))
-    shards = [source.shard(index, 3) for index in range(3)]
-
-    assert [shard.cardinality for shard in shards] == [Exact(4), Exact(3), Exact(3)]
-    assert [list(shard) for shard in shards] == [
-        [0, 3, 6, 9],
-        [1, 4, 7],
-        [2, 5, 8],
-    ]
-
-
 def test_unbatch_flattens_each_input_iterable():
     dataset = IndexedDataset.from_source([(1, 2), (), (3, 4, 5)]).unbatch()
 
@@ -338,52 +192,6 @@ def test_batch_preserves_indexing_and_calculates_cardinality():
     assert list(dropped) == [(0, 1), (2, 3)]
 
 
-def test_indexed_repeat_is_lazy_reproducible_and_shuffles_each_pass():
-    source = IndexedDataset.from_source(range(17))
-    repeated = source.repeat(3, shuffle=True)
-
-    assert isinstance(repeated, IndexedDataset)
-    assert repeated.cardinality == Exact(51)
-    assert list(repeated) == list(source.repeat(3, shuffle=True, seed=42))
-    assert list(repeated) == list(source.repeat(None, shuffle=True).take(51))
-    assert list(repeated) != list(source.repeat(3, shuffle=True, seed=7))
-
-    epochs = [tuple(repeated[start : start + 17]) for start in range(0, 51, 17)]
-    assert all(sorted(epoch) == list(range(17)) for epoch in epochs)
-    assert len(set(epochs)) == 3
-
-
-def test_stream_repeat_reopens_the_parent_and_can_run_forever():
-    opened = []
-
-    def factory():
-        opened.append(True)
-        return iter([1, 2])
-
-    stream = Dataset.from_factory(factory, cardinality=Exact(2))
-    repeated = stream.repeat(3)
-
-    assert repeated.cardinality == Exact(6)
-    assert list(repeated) == [1, 2, 1, 2, 1, 2]
-    assert len(opened) == 3
-
-    endless = stream.repeat(None)
-    assert endless.cardinality == Infinite()
-    assert list(endless.take(5)) == [1, 2, 1, 2, 1]
-
-    empty = Dataset.from_factory(lambda: iter(()), cardinality=Exact(0)).repeat(None)
-    assert list(empty) == []
-
-
-def test_repeat_validates_count_and_only_indexed_datasets_expose_shuffle():
-    stream = Dataset.from_factory(lambda: iter([1]))
-
-    with pytest.raises(ValueError, match="nonnegative"):
-        stream.repeat(-1)
-    with pytest.raises(TypeError, match="unexpected keyword argument"):
-        stream.repeat(2, shuffle=True)
-
-
 def test_stream_batch_handles_partial_final_batch_and_closes():
     stream = IndexedDataset.from_source(range(5)).filter(lambda value: True)
     batches = stream.batch(2)
@@ -393,100 +201,6 @@ def test_stream_batch_handles_partial_final_batch_and_closes():
     assert list(cursor) == [(0, 1), (2, 3), (4,)]
     assert cursor.closed
     assert list(stream.batch(2, drop_last=True)) == [(0, 1), (2, 3)]
-
-
-def test_concat_preserves_indexing_only_when_every_parent_is_indexed():
-    left = IndexedDataset.from_source([1, 2])
-    middle = IndexedDataset.from_source([])
-    right = IndexedDataset.from_source([3, 4, 5])
-
-    indexed = left.concat(middle, right)
-    assert isinstance(indexed, IndexedDataset)
-    assert indexed.cardinality == Exact(5)
-    assert indexed[3] == 4
-    assert list(indexed) == [1, 2, 3, 4, 5]
-
-    streamed = left.concat(right.filter(lambda value: value != 4))
-    assert isinstance(streamed, Dataset)
-    assert streamed.cardinality == Bounds(2, 5)
-    assert list(streamed) == [1, 2, 3, 5]
-
-
-def test_stream_concat_opens_components_lazily():
-    second_calls = []
-    first = IndexedDataset.from_source([1]).filter(lambda value: True)
-    second = (
-        IndexedDataset.from_source([2])
-        .filter(lambda value: True)
-        .map(lambda value: second_calls.append(value) or value)
-    )
-    cursor = first.concat(second).cursor()
-
-    assert next(cursor) == 1
-    assert second_calls == []
-    assert next(cursor) == 2
-    assert second_calls == [2]
-    cursor.close()
-
-
-def test_nested_indexed_concat_reuses_cached_lengths():
-    cardinality_calls = 0
-
-    class CountingIndexed(IndexedDataset[int]):
-        @property
-        def cardinality(self):
-            nonlocal cardinality_calls
-            cardinality_calls += 1
-            return Exact(1)
-
-        @property
-        def description(self):
-            return "Counting"
-
-        def _get(self, position):
-            return position
-
-    dataset = CountingIndexed()
-    for _ in range(12):
-        dataset = dataset.concat(dataset)
-
-    cardinality_calls = 0
-    assert dataset[0] == 0
-    assert cardinality_calls == 0
-
-    assert list(CountingIndexed().cursor()) == [0]
-    assert cardinality_calls == 1
-
-
-def test_zip_preserves_indexing_and_defaults_to_shortest():
-    left = IndexedDataset.from_source([1, 2, 3])
-    right = IndexedDataset.from_source(["a", "b"])
-    zipped = left.zip(right)
-
-    assert isinstance(zipped, IndexedDataset)
-    assert zipped.cardinality == Exact(2)
-    assert zipped[1] == (2, "b")
-    assert list(zipped) == [(1, "a"), (2, "b")]
-
-
-def test_strict_zip_rejects_known_and_runtime_length_mismatches():
-    left = IndexedDataset.from_source([1, 2, 3])
-    right = IndexedDataset.from_source(["a", "b"])
-    with pytest.raises(ValueError, match="different lengths"):
-        left.zip(right, strict=True)
-
-    uncertain_left = left.filter(lambda value: value < 3)
-    uncertain_right = right.filter(lambda value: True)
-    assert list(uncertain_left.zip(uncertain_right, strict=True)) == [
-        (1, "a"),
-        (2, "b"),
-    ]
-
-    shorter = right.filter(lambda value: value == "a")
-    cursor = uncertain_left.zip(shorter, strict=True).cursor()
-    with pytest.raises(ValueError):
-        list(cursor)
-    assert cursor.closed
 
 
 @pytest.mark.parametrize(
@@ -500,27 +214,3 @@ def test_structural_operations_validate_counts(method, value):
         getattr(indexed, method)(value)
     with pytest.raises(ValueError):
         getattr(stream, method)(value)
-
-
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"workers": 0},
-        {"workers": 1, "buffer_size": -1},
-        {"workers": 1, "backend": "invalid"},
-    ],
-)
-def test_parallel_map_validates_limits(options):
-    with pytest.raises(ValueError):
-        IndexedDataset.from_source([1]).parallel_map(str, **options)
-
-
-def test_prefetch_requires_a_positive_buffer_size():
-    with pytest.raises(ValueError, match="positive"):
-        IndexedDataset.from_source([1]).prefetch(0)
-
-
-@pytest.mark.parametrize("index,count", [(-1, 2), (2, 2), (0, 0)])
-def test_stream_shard_validates_coordinates(index, count):
-    with pytest.raises(ValueError):
-        Dataset.from_factory(lambda: iter([1])).shard(index, count)

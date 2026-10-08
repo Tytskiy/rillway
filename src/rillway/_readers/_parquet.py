@@ -4,8 +4,8 @@ from hashlib import sha256
 from operator import index as to_index
 from typing import Any, BinaryIO, ClassVar, Protocol, cast
 
+from ..cursor import Cursor, State
 from ._file import _File, _FileIdentity, _validate_file
-from .cursor import Cursor, State
 
 
 @dataclass(frozen=True)

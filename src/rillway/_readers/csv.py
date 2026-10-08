@@ -3,6 +3,9 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import TextIO
 
+from ..cardinality import Cardinality, Unknown
+from ..cursor import Cursor, State
+from ..dataset import Dataset
 from ._file import (
     _File,
     _FileIdentity,
@@ -11,9 +14,6 @@ from ._file import (
     _save_file_position,
     _validate_file,
 )
-from .cardinality import Cardinality, Unknown
-from .cursor import Cursor, State
-from .dataset import Dataset
 
 
 @dataclass(init=False)

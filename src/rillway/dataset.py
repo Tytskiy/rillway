@@ -8,28 +8,12 @@ and delegate mode-specific execution to their operation object.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from bisect import bisect_right
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
-from itertools import accumulate
-from math import isfinite
+from dataclasses import dataclass
 from operator import index as to_index
-from typing import Any, ClassVar, Literal, Protocol, cast, overload, runtime_checkable
+from typing import Any, ClassVar, Literal, Protocol, overload, runtime_checkable
 
 from . import cursor as cursors
-from ._operation import (
-    _Batch,
-    _ExactOperation,
-    _Filter,
-    _FlatMap,
-    _Map,
-    _Operation,
-    _ParallelMap,
-    _Skip,
-    _StreamOperation,
-    _Take,
-    _Unbatch,
-)
 from .cardinality import Bounds, Cardinality, Exact, Infinite, Unknown
 from .cursor import Cursor
 
@@ -67,6 +51,8 @@ class Dataset[T](ABC):
         return "\n".join(_explain(self))
 
     def map[U](self, fn: Callable[[T], U], *, name: str | None = None) -> Dataset[U]:
+        from ._ops.transforms import _Map, _UnaryDataset
+
         return _UnaryDataset(self, _Map(fn, _callable_name(fn, name)))
 
     def parallel_map[U](
@@ -92,21 +78,25 @@ class Dataset[T](ABC):
             if buffer_size is None
             else _nonnegative("buffer_size", buffer_size)
         )
+        from ._ops.concurrency import _ParallelMapDataset
+
         return _ParallelMapDataset(
             self,
-            _ParallelMap(
-                fn,
-                _callable_name(fn, name),
-                workers,
-                buffer_size,
-                backend,
-            ),
+            fn,
+            _callable_name(fn, name),
+            workers,
+            buffer_size,
+            backend,
         )
 
     def prefetch(self, buffer_size: int) -> Dataset[T]:
+        from ._ops.concurrency import _PrefetchDataset
+
         return _PrefetchDataset(self, _positive("buffer_size", buffer_size))
 
     def shuffle(self, buffer_size: int, *, seed: int = 42) -> Dataset[T]:
+        from ._ops.ordering import _ShuffleDataset
+
         return _ShuffleDataset(
             self,
             _positive("buffer_size", buffer_size),
@@ -114,32 +104,50 @@ class Dataset[T](ABC):
         )
 
     def filter(self, predicate: Callable[[T], bool], *, name: str | None = None) -> Dataset[T]:
+        from ._ops.transforms import _Filter, _UnaryDataset
+
         return _UnaryDataset(self, _Filter(predicate, _callable_name(predicate, name)))
 
     def flat_map[U](self, fn: Callable[[T], Iterable[U]], *, name: str | None = None) -> Dataset[U]:
+        from ._ops.transforms import _FlatMap, _UnaryDataset
+
         return _UnaryDataset(self, _FlatMap(fn, _callable_name(fn, name)))
 
     def take(self, count: int) -> Dataset[T]:
+        from ._ops.transforms import _Take, _UnaryDataset
+
         return _UnaryDataset(self, _Take(_nonnegative("count", count)))
 
     def skip(self, count: int) -> Dataset[T]:
+        from ._ops.transforms import _Skip, _UnaryDataset
+
         return _UnaryDataset(self, _Skip(_nonnegative("count", count)))
 
     def batch(self, size: int, *, drop_last: bool = False) -> Dataset[tuple[T, ...]]:
+        from ._ops.transforms import _Batch, _UnaryDataset
+
         return _UnaryDataset(self, _Batch(_positive("size", size), drop_last))
 
     def unbatch[U](self: Dataset[Iterable[U]]) -> Dataset[U]:
+        from ._ops.transforms import _UnaryDataset, _Unbatch
+
         return _UnaryDataset(self, _Unbatch())
 
     def repeat(self, count: int | None) -> Dataset[T]:
+        from ._ops.ordering import _repeat_dataset
+
         return _repeat_dataset(self, count)
 
     def concat(self, *others: Dataset[T]) -> Dataset[T]:
+        from ._ops.composition import _concat_datasets
+
         return _concat_datasets(self, others)
 
     def interleave(self, *others: Dataset[T]) -> Dataset[T]:
         if not others:
             return self
+        from ._ops.composition import _InterleaveDataset
+
         return _InterleaveDataset((self, *others))
 
     def mix(
@@ -148,12 +156,18 @@ class Dataset[T](ABC):
         weights: Iterable[float],
         seed: int = 42,
     ) -> Dataset[T]:
+        from ._ops.composition import _mix_datasets
+
         return _mix_datasets(self, others, weights, seed)
 
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
+        from ._ops.composition import _zip_datasets
+
         return _zip_datasets(self, other, strict)
 
     def shard(self, index: int, count: int) -> Dataset[T]:
+        from ._ops.ordering import _ShardDataset
+
         index, count = _validate_shard(index, count)
         return _ShardDataset(self, index, count)
 
@@ -212,6 +226,8 @@ class RangeDataset[T](Dataset[T], ABC):
         return _RangeSlice(self, start, stop)
 
     def map[U](self, fn: Callable[[T], U], *, name: str | None = None) -> RangeDataset[U]:
+        from ._ops.transforms import _Map, _UnaryRange
+
         return _UnaryRange(self, _Map(fn, _callable_name(fn, name)))
 
     def take(self, count: int) -> RangeDataset[T]:
@@ -222,6 +238,8 @@ class RangeDataset[T](Dataset[T], ABC):
         return _RangeSlice(self, start, len(self))
 
     def batch(self, size: int, *, drop_last: bool = False) -> RangeDataset[tuple[T, ...]]:
+        from ._ops.transforms import _Batch, _UnaryRange
+
         return _UnaryRange(self, _Batch(_positive("size", size), drop_last))
 
     @overload  # type: ignore[override]
@@ -237,6 +255,8 @@ class RangeDataset[T](Dataset[T], ABC):
     ) -> Dataset[T]: ...
 
     def repeat(self, count: int | None) -> Dataset[T]:
+        from ._ops.ordering import _repeat_dataset
+
         return _repeat_dataset(self, count)
 
     @overload
@@ -246,6 +266,8 @@ class RangeDataset[T](Dataset[T], ABC):
     def concat(self, *others: Dataset[T]) -> Dataset[T]: ...
 
     def concat(self, *others: Dataset[T]) -> Dataset[T]:
+        from ._ops.composition import _concat_datasets
+
         return _concat_datasets(self, others)
 
     @overload
@@ -255,6 +277,8 @@ class RangeDataset[T](Dataset[T], ABC):
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]: ...
 
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
+        from ._ops.composition import _zip_datasets
+
         return _zip_datasets(self, other, strict)
 
 
@@ -303,6 +327,8 @@ class IndexedDataset[T](RangeDataset[T], ABC):
         return self[start:stop]
 
     def map[U](self, fn: Callable[[T], U], *, name: str | None = None) -> IndexedDataset[U]:
+        from ._ops.transforms import _Map, _UnaryIndexed
+
         return _UnaryIndexed(self, _Map(fn, _callable_name(fn, name)))
 
     def take(self, count: int) -> IndexedDataset[T]:
@@ -312,6 +338,8 @@ class IndexedDataset[T](RangeDataset[T], ABC):
         return self[_nonnegative("count", count) :]
 
     def batch(self, size: int, *, drop_last: bool = False) -> IndexedDataset[tuple[T, ...]]:
+        from ._ops.transforms import _Batch, _UnaryIndexed
+
         return _UnaryIndexed(self, _Batch(_positive("size", size), drop_last))
 
     @overload  # type: ignore[override]
@@ -339,6 +367,8 @@ class IndexedDataset[T](RangeDataset[T], ABC):
         shuffle: bool = False,
         seed: int = 42,
     ) -> Dataset[T]:
+        from ._ops.ordering import _repeat_dataset
+
         return _repeat_dataset(self, count, shuffle=shuffle, seed=seed)
 
     @overload  # type: ignore[override]
@@ -354,6 +384,8 @@ class IndexedDataset[T](RangeDataset[T], ABC):
     def concat(self, *others: Dataset[T]) -> Dataset[T]: ...
 
     def concat(self, *others: Dataset[T]) -> Dataset[T]:
+        from ._ops.composition import _concat_datasets
+
         return _concat_datasets(self, others)
 
     @overload  # type: ignore[override]
@@ -371,20 +403,9 @@ class IndexedDataset[T](RangeDataset[T], ABC):
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]: ...
 
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
+        from ._ops.composition import _zip_datasets
+
         return _zip_datasets(self, other, strict)
-
-
-class _UnaryNode[T]:
-    parent: Dataset[T]
-    operation: _Operation
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def description(self) -> str:
-        return self.operation.description
 
 
 @runtime_checkable
@@ -462,325 +483,6 @@ class _RangeSlice[T](RangeDataset[T]):
 
 
 @dataclass(frozen=True, slots=True)
-class _RepeatRange[T](RangeDataset[T]):
-    parent: RangeDataset[T]
-    count: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Exact:
-        return Exact(len(self.parent) * self.count)
-
-    @property
-    def description(self) -> str:
-        return _repeat_description(self.count, False, 42)
-
-    def _open_range(self, start: int, stop: int) -> Cursor[T]:
-        length = len(self.parent)
-        if length == 0:
-            return cursors.ConcatCursor(self, ())
-        components = []
-        while start < stop:
-            offset = start % length
-            component_stop = min(length, offset + stop - start)
-            components.append(_RangeSlice(self.parent, offset, component_stop))
-            start += component_stop - offset
-        return cursors.ConcatCursor(self, tuple(components))
-
-
-@dataclass(frozen=True, slots=True)
-class _RepeatIndexed[T](IndexedDataset[T]):
-    parent: IndexedDataset[T]
-    count: int
-    shuffled: bool
-    seed: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Exact:
-        return Exact(len(self.parent) * self.count)
-
-    @property
-    def description(self) -> str:
-        return _repeat_description(self.count, self.shuffled, self.seed)
-
-    def _get(self, position: int) -> T:
-        length = len(self.parent)
-        epoch, position = divmod(position, length)
-        if self.shuffled:
-            position = _shuffle_position(position, length, self.seed, epoch)
-        return self.parent._get(position)
-
-
-@dataclass(frozen=True, slots=True)
-class _ShuffledEpochIndexed[T](IndexedDataset[T]):
-    parent: IndexedDataset[T]
-    seed: int
-    epoch: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Exact:
-        return self.parent.cardinality
-
-    @property
-    def description(self) -> str:
-        return f"Shuffle(seed={self.seed}, epoch={self.epoch})"
-
-    def _get(self, position: int) -> T:
-        position = _shuffle_position(position, len(self.parent), self.seed, self.epoch)
-        return self.parent._get(position)
-
-
-@dataclass(frozen=True, slots=True)
-class _UnaryRange[T, U](_UnaryNode[T], RangeDataset[U]):
-    parent: RangeDataset[T]
-    operation: _ExactOperation[T, U]
-
-    @property
-    def cardinality(self) -> Exact:
-        return self.operation.exact_cardinality(self.parent.cardinality)
-
-    def _open_range(
-        self,
-        start: int,
-        stop: int,
-    ) -> Cursor[U]:
-        return self.operation.open_range(self, self.parent, start, stop)
-
-
-@dataclass(frozen=True, slots=True)
-class _ConcatRange[T](RangeDataset[T]):
-    components: tuple[RangeDataset[T], ...]
-    _ends: tuple[int, ...] = field(repr=False)
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.components
-
-    @property
-    def cardinality(self) -> Exact:
-        return Exact(self._ends[-1] if self._ends else 0)
-
-    @property
-    def description(self) -> str:
-        return f"Concat(count={len(self.components)})"
-
-    def _open_range(
-        self,
-        start: int,
-        stop: int,
-    ) -> Cursor[T]:
-        selected = []
-        position = start
-        while position < stop:
-            component_index = bisect_right(self._ends, position)
-            component_start = self._ends[component_index - 1] if component_index else 0
-            component_stop = self._ends[component_index]
-            local_stop = min(stop, component_stop) - component_start
-            selected.append(
-                _RangeSlice(
-                    self.components[component_index],
-                    position - component_start,
-                    local_stop,
-                )
-            )
-            position = component_stop
-        return cursors.ConcatCursor(self, tuple(selected))
-
-
-@dataclass(frozen=True, slots=True)
-class _ZipRange[T, U](RangeDataset[tuple[T, U]]):
-    left: RangeDataset[T]
-    right: RangeDataset[U]
-    strict: bool
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.left, self.right
-
-    @property
-    def cardinality(self) -> Exact:
-        return Exact(min(len(self.left), len(self.right)))
-
-    @property
-    def description(self) -> str:
-        return f"Zip(strict={self.strict})"
-
-    def _open_range(
-        self,
-        start: int,
-        stop: int,
-    ) -> Cursor[tuple[T, U]]:
-        return cursors.ZipCursor(
-            self,
-            self.left.open_range(start, stop),
-            self.right.open_range(start, stop),
-            self.strict,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _UnaryIndexed[T, U](_UnaryNode[T], IndexedDataset[U]):
-    parent: IndexedDataset[T]
-    operation: _ExactOperation[T, U]
-
-    @property
-    def cardinality(self) -> Exact:
-        return self.operation.exact_cardinality(self.parent.cardinality)
-
-    def _get(self, position: int) -> U:
-        return self.operation.get(self.parent, position)
-
-
-@dataclass(frozen=True, slots=True)
-class _UnaryDataset[T, U](_UnaryNode[T], Dataset[U]):
-    parent: Dataset[T]
-    operation: _StreamOperation[T, U]
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return self.operation.cardinality(self.parent.cardinality)
-
-    def cursor(self) -> Cursor[U]:
-        return self.operation.open(self, self.parent.cursor())
-
-
-@dataclass(frozen=True, slots=True)
-class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
-    parent: Dataset[T]
-    operation: _ParallelMap[T, U]
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return self.operation.cardinality(self.parent.cardinality)
-
-    def cursor(self) -> Cursor[U]:
-        return self.operation.open(self, self.parent.cursor())
-
-
-@dataclass(frozen=True, slots=True)
-class _PrefetchDataset[T](Dataset[T]):
-    parent: Dataset[T]
-    buffer_size: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return self.parent.cardinality
-
-    @property
-    def description(self) -> str:
-        return f"Prefetch(buffer_size={self.buffer_size})"
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.PrefetchCursor(self, self.parent.cursor(), self.buffer_size)
-
-
-@dataclass(frozen=True, slots=True)
-class _ShuffleDataset[T](Dataset[T]):
-    parent: Dataset[T]
-    buffer_size: int
-    seed: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return self.parent.cardinality
-
-    @property
-    def description(self) -> str:
-        return f"Shuffle(buffer_size={self.buffer_size}, seed={self.seed})"
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.ShuffleCursor(
-            self,
-            self.parent.cursor(),
-            self.buffer_size,
-            self.seed,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _ShardDataset[T](Dataset[T]):
-    parent: Dataset[T]
-    index: int
-    count: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Cardinality:
-        parent = self.parent.cardinality
-        if isinstance(parent, Exact):
-            return Exact(_strided_shard_size(parent, self.index, self.count))
-        if isinstance(parent, Bounds):
-            return Bounds(
-                _strided_shard_size(parent.lower, self.index, self.count),
-                _strided_shard_size(parent.upper, self.index, self.count),
-            )
-        return parent
-
-    @property
-    def description(self) -> str:
-        return f"Shard(index={self.index}, count={self.count})"
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.ShardCursor(
-            self,
-            self.parent.cursor(),
-            self.index,
-            self.count,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _RepeatDataset[T](Dataset[T]):
-    parent: Dataset[T]
-    count: int | None
-    shuffled: bool
-    seed: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return (self.parent,)
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return _repeat_cardinality(self.parent.cardinality, self.count)
-
-    @property
-    def description(self) -> str:
-        return _repeat_description(self.count, self.shuffled, self.seed)
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.RepeatCursor(self)
-
-    def _open_epoch(self, epoch: int) -> Cursor[T]:
-        if self.shuffled:
-            assert isinstance(self.parent, IndexedDataset)
-            return _ShuffledEpochIndexed(self.parent, self.seed, epoch).cursor()
-        return self.parent.cursor()
-
-
-@dataclass(frozen=True, slots=True)
 class _FactoryDataset[T](Dataset[T]):
     supports_checkpointing: ClassVar[bool] = False
 
@@ -798,350 +500,6 @@ class _FactoryDataset[T](Dataset[T]):
 
     def cursor(self) -> Cursor[T]:
         return Cursor.from_iterator(iter(self.factory()), dataset=self)
-
-
-@dataclass(frozen=True, slots=True)
-class _ConcatIndexed[T](IndexedDataset[T]):
-    components: tuple[IndexedDataset[T], ...]
-    _ends: tuple[int, ...] = field(repr=False)
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.components
-
-    @property
-    def cardinality(self) -> Exact:
-        return Exact(self._ends[-1] if self._ends else 0)
-
-    @property
-    def description(self) -> str:
-        return f"Concat(count={len(self.components)})"
-
-    def _get(self, position: int) -> T:
-        component = bisect_right(self._ends, position)
-        start = self._ends[component - 1] if component else 0
-        return self.components[component]._get(position - start)
-
-
-@dataclass(frozen=True, slots=True)
-class _ConcatDataset[T](Dataset[T]):
-    components: tuple[Dataset[T], ...]
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.components
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return _sum_cardinality(self.components)
-
-    @property
-    def description(self) -> str:
-        return f"Concat(count={len(self.components)})"
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.ConcatCursor(self, self.components)
-
-
-@dataclass(frozen=True, slots=True)
-class _InterleaveDataset[T](Dataset[T]):
-    components: tuple[Dataset[T], ...]
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.components
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return _sum_cardinality(self.components)
-
-    @property
-    def description(self) -> str:
-        return f"Interleave(count={len(self.components)})"
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.InterleaveCursor(self, self.components)
-
-
-@dataclass(frozen=True, slots=True)
-class _MixDataset[T](Dataset[T]):
-    components: tuple[Dataset[T], ...]
-    weights: tuple[float, ...]
-    seed: int
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.components
-
-    @property
-    def cardinality(self) -> Cardinality:
-        return _sum_cardinality(self.components)
-
-    @property
-    def description(self) -> str:
-        return f"Mix(weights={self.weights!r}, seed={self.seed})"
-
-    def cursor(self) -> Cursor[T]:
-        return cursors.MixCursor(self)
-
-    def _select(self, active: list[bool], draw: int) -> int:
-        total = sum(
-            weight
-            for weight, is_active in zip(self.weights, active, strict=True)
-            if is_active
-        )
-        random = _mix64((self.seed & _UINT64_MASK) ^ _mix64(draw)) >> 11
-        target = random * (2.0**-53) * total
-        cumulative = 0.0
-        selected = -1
-        for index, (weight, is_active) in enumerate(
-            zip(self.weights, active, strict=True)
-        ):
-            if not is_active:
-                continue
-            selected = index
-            cumulative += weight
-            if target < cumulative:
-                return index
-        assert selected >= 0
-        return selected
-
-
-@dataclass(frozen=True, slots=True)
-class _ZipIndexed[T, U](IndexedDataset[tuple[T, U]]):
-    left: IndexedDataset[T]
-    right: IndexedDataset[U]
-    strict: bool
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.left, self.right
-
-    @property
-    def cardinality(self) -> Exact:
-        return Exact(min(len(self.left), len(self.right)))
-
-    @property
-    def description(self) -> str:
-        return f"Zip(strict={self.strict})"
-
-    def _get(self, position: int) -> tuple[T, U]:
-        return self.left._get(position), self.right._get(position)
-
-
-@dataclass(frozen=True, slots=True)
-class _ZipDataset[T, U](Dataset[tuple[T, U]]):
-    left: Dataset[T]
-    right: Dataset[U]
-    strict: bool
-
-    @property
-    def parents(self) -> tuple[Dataset[Any], ...]:
-        return self.left, self.right
-
-    @property
-    def cardinality(self) -> Cardinality:
-        left = self.left.cardinality
-        right = self.right.cardinality
-        if isinstance(left, Infinite) and isinstance(right, Infinite):
-            return Infinite()
-        if isinstance(left, Infinite):
-            return right
-        if isinstance(right, Infinite):
-            return left
-
-        def bounds(cardinality: Cardinality) -> tuple[int, int] | None:
-            if isinstance(cardinality, Exact):
-                return cardinality, cardinality
-            if isinstance(cardinality, Bounds):
-                return cardinality.lower, cardinality.upper
-            return None
-
-        left_bounds, right_bounds = bounds(left), bounds(right)
-        if left_bounds is None and right_bounds is None:
-            return Unknown()
-        if left_bounds is None:
-            assert right_bounds is not None
-            return Exact(0) if right_bounds[1] == 0 else Bounds(0, right_bounds[1])
-        if right_bounds is None:
-            return Exact(0) if left_bounds[1] == 0 else Bounds(0, left_bounds[1])
-        lower = min(left_bounds[0], right_bounds[0])
-        upper = min(left_bounds[1], right_bounds[1])
-        return Exact(lower) if lower == upper else Bounds(lower, upper)
-
-    @property
-    def description(self) -> str:
-        return f"Zip(strict={self.strict})"
-
-    def cursor(self) -> Cursor[tuple[T, U]]:
-        return cursors.ZipCursor(
-            self,
-            self.left.cursor(),
-            self.right.cursor(),
-            self.strict,
-        )
-
-
-def _concat_datasets[T](first: Dataset[T], others: tuple[Dataset[T], ...]) -> Dataset[T]:
-    if not others:
-        return first
-    components = (first, *others)
-    if all(isinstance(component, IndexedDataset) for component in components):
-        indexed = cast(tuple[IndexedDataset[T], ...], components)
-        return _ConcatIndexed(indexed, _component_ends(indexed))
-    if all(isinstance(component, RangeDataset) for component in components):
-        ranged = cast(tuple[RangeDataset[T], ...], components)
-        return _ConcatRange(ranged, _component_ends(ranged))
-    return _ConcatDataset(components)
-
-
-def _component_ends[T](components: tuple[RangeDataset[T], ...]) -> tuple[int, ...]:
-    return tuple(accumulate(map(len, components)))
-
-
-def _mix_datasets[T](
-    first: Dataset[T],
-    others: tuple[Dataset[T], ...],
-    weights: Iterable[float],
-    seed: int,
-) -> Dataset[T]:
-    try:
-        normalized_weights = tuple(float(weight) for weight in weights)
-    except (TypeError, ValueError) as error:
-        raise TypeError("weights must be an iterable of numbers") from error
-    components = (first, *others)
-    if len(normalized_weights) != len(components):
-        raise ValueError("weights must contain one value per dataset")
-    if any(weight <= 0 or not isfinite(weight) for weight in normalized_weights):
-        raise ValueError("weights must contain only positive finite values")
-    if not isfinite(sum(normalized_weights)):
-        raise ValueError("weight sum must be finite")
-    seed = to_index(seed)
-    if not others:
-        return first
-    return _MixDataset(components, normalized_weights, seed)
-
-
-def _zip_datasets[T, U](
-    left: Dataset[T],
-    right: Dataset[U],
-    strict: bool,
-) -> Dataset[tuple[T, U]]:
-    left_cardinality = left.cardinality
-    right_cardinality = right.cardinality
-    if (
-        strict
-        and isinstance(left_cardinality, Exact)
-        and isinstance(right_cardinality, Exact)
-        and left_cardinality != right_cardinality
-    ):
-        raise ValueError("zip inputs have different lengths")
-    if isinstance(left, IndexedDataset) and isinstance(right, IndexedDataset):
-        return _ZipIndexed(left, right, strict)
-    if isinstance(left, RangeDataset) and isinstance(right, RangeDataset):
-        return _ZipRange(left, right, strict)
-    return _ZipDataset(left, right, strict)
-
-
-def _repeat_dataset[T](
-    parent: Dataset[T],
-    count: int | None,
-    *,
-    shuffle: bool = False,
-    seed: int = 42,
-) -> Dataset[T]:
-    count = None if count is None else _nonnegative("count", count)
-    seed = to_index(seed)
-    if shuffle and not isinstance(parent, IndexedDataset):
-        raise TypeError("shuffled repetition requires an IndexedDataset")
-    if count is not None:
-        if isinstance(parent, IndexedDataset):
-            return _RepeatIndexed(parent, count, shuffle, seed)
-        if isinstance(parent, RangeDataset):
-            return _RepeatRange(parent, count)
-    return _RepeatDataset(parent, count, shuffle, seed)
-
-
-def _repeat_cardinality(parent: Cardinality, count: int | None) -> Cardinality:
-    if (
-        count == 0
-        or isinstance(parent, Exact)
-        and parent == 0
-        or isinstance(parent, Bounds)
-        and parent.upper == 0
-    ):
-        return Exact(0)
-    if count is None:
-        if isinstance(parent, Exact) or isinstance(parent, Infinite):
-            return Infinite()
-        if isinstance(parent, Bounds) and parent.lower > 0:
-            return Infinite()
-        return Unknown()
-    if isinstance(parent, Exact):
-        return Exact(parent * count)
-    if isinstance(parent, Bounds):
-        return Bounds(parent.lower * count, parent.upper * count)
-    return parent
-
-
-def _sum_cardinality(components: tuple[Dataset[Any], ...]) -> Cardinality:
-    lower = upper = 0
-    unknown = False
-    for component in components:
-        cardinality = component.cardinality
-        if isinstance(cardinality, Infinite):
-            return Infinite()
-        if isinstance(cardinality, Unknown):
-            unknown = True
-        elif isinstance(cardinality, Exact):
-            lower += cardinality
-            upper += cardinality
-        else:
-            lower += cardinality.lower
-            upper += cardinality.upper
-    if unknown:
-        return Unknown()
-    return Exact(lower) if lower == upper else Bounds(lower, upper)
-
-
-def _strided_shard_size(size: int, index: int, count: int) -> int:
-    return max(0, (size + count - index - 1) // count)
-
-
-def _repeat_description(count: int | None, shuffle: bool, seed: int) -> str:
-    if shuffle:
-        return f"Repeat(count={count}, shuffle=True, seed={seed})"
-    return f"Repeat(count={count}, shuffle=False)"
-
-
-_UINT64_MASK = (1 << 64) - 1
-
-
-def _mix64(value: int) -> int:
-    value = (value + 0x9E3779B97F4A7C15) & _UINT64_MASK
-    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
-    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
-    return value ^ (value >> 31)
-
-
-def _shuffle_position(position: int, length: int, seed: int, epoch: int) -> int:
-    if length < 2:
-        return position
-    bits = (length - 1).bit_length()
-    bits += bits % 2
-    half_bits = bits // 2
-    half_mask = (1 << half_bits) - 1
-    key = _mix64((seed & _UINT64_MASK) ^ _mix64(epoch))
-
-    # Cycle walking restricts the Feistel permutation to exactly [0, length).
-    while True:
-        left, right = position >> half_bits, position & half_mask
-        for round_index in range(6):
-            round_key = key ^ (round_index * 0x9E3779B97F4A7C15)
-            left, right = right, left ^ (_mix64(right ^ round_key) & half_mask)
-        position = (left << half_bits) | right
-        if position < length:
-            return position
 
 
 def _callable_name(fn: Callable[..., Any], name: str | None) -> str:

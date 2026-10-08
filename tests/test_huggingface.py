@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import rillway.huggingface as huggingface_module
+import rillway._readers.huggingface as huggingface_module
 from rillway import Exact, HuggingFaceDataset, RangeDataset
 
 pyarrow = pytest.importorskip("pyarrow")

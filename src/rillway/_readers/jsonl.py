@@ -2,6 +2,9 @@ import json
 from dataclasses import dataclass
 from typing import BinaryIO, cast
 
+from ..cardinality import Cardinality, Unknown
+from ..cursor import Cursor, State
+from ..dataset import Dataset
 from ._file import (
     _File,
     _FileIdentity,
@@ -10,9 +13,6 @@ from ._file import (
     _save_file_position,
     _validate_file,
 )
-from .cardinality import Cardinality, Unknown
-from .cursor import Cursor, State
-from .dataset import Dataset
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 

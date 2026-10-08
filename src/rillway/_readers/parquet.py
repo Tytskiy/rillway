@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, ClassVar
 
+from ..cardinality import Exact
+from ..cursor import Cursor
+from ..dataset import RangeDataset
 from ._file import _File, _file_identity, _FilePath
 from ._parquet import (
     _normalize_columns,
@@ -12,9 +15,6 @@ from ._parquet import (
     _ParquetFile,
     _read_row_groups,
 )
-from .cardinality import Exact
-from .cursor import Cursor
-from .dataset import RangeDataset
 
 
 def _pyarrow_parquet() -> Any:
