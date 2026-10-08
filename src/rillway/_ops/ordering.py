@@ -91,6 +91,28 @@ class _ShuffledEpochIndexed[T](IndexedDataset[T]):
 
 
 @dataclass(frozen=True, slots=True)
+class _ShuffleIndexed[T](IndexedDataset[T]):
+    parent: IndexedDataset[T]
+    seed: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return (self.parent,)
+
+    @property
+    def cardinality(self) -> Exact:
+        return self.parent.cardinality
+
+    @property
+    def description(self) -> str:
+        return f"Shuffle(seed={self.seed})"
+
+    def _get(self, position: int) -> T:
+        position = _shuffle_position(position, len(self.parent), self.seed, 0)
+        return self.parent._get(position)
+
+
+@dataclass(frozen=True, slots=True)
 class _ShuffleDataset[T](Dataset[T]):
     parent: Dataset[T]
     buffer_size: int

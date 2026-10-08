@@ -13,6 +13,20 @@ def resource_stream(values, closed):
     return Dataset.from_factory(factory)
 
 
+def test_indexed_shuffle_is_global_reproducible_and_preserves_indexing():
+    source = IndexedDataset.from_source(range(20))
+    shuffled = source.shuffle(seed=7)
+
+    assert isinstance(shuffled, IndexedDataset)
+    assert shuffled.cardinality == Exact(20)
+    assert sorted(shuffled) == list(source)
+    assert list(shuffled) == list(source.shuffle(seed=7))
+    assert list(shuffled) != list(source.shuffle(seed=8))
+    assert shuffled[5] == list(shuffled)[5]
+    assert list(shuffled.open_range(4, 8)) == list(shuffled)[4:8]
+    assert shuffled.explain().startswith("Shuffle(seed=7)")
+
+
 def test_stream_shuffle_is_bounded_reproducible_and_preserves_cardinality():
     consumed = []
 

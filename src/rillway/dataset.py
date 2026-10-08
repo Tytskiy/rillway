@@ -331,6 +331,29 @@ class IndexedDataset[T](RangeDataset[T], ABC):
 
         return _UnaryIndexed(self, _Map(fn, _callable_name(fn, name)))
 
+    @overload
+    def shuffle(
+        self,
+        buffer_size: None = None,
+        *,
+        seed: int = 42,
+    ) -> IndexedDataset[T]: ...
+
+    @overload
+    def shuffle(self, buffer_size: int, *, seed: int = 42) -> Dataset[T]: ...
+
+    def shuffle(
+        self,
+        buffer_size: int | None = None,
+        *,
+        seed: int = 42,
+    ) -> Dataset[T]:
+        if buffer_size is not None:
+            return super().shuffle(buffer_size, seed=seed)
+        from ._ops.ordering import _ShuffleIndexed
+
+        return _ShuffleIndexed(self, to_index(seed))
+
     def take(self, count: int) -> IndexedDataset[T]:
         return self[: _nonnegative("count", count)]
 

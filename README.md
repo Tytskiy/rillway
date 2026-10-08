@@ -158,6 +158,13 @@ The default seed is `42`; pass `seed=...` when you want another order. Use
 `repeat(None)` for an endless dataset and combine it with `take()` when you
 want a fixed number of items.
 
+Indexed datasets can also be shuffled directly. This produces a global
+permutation while preserving indexing and range access:
+
+```python
+shuffled = numbers.shuffle(seed=42)
+```
+
 Use bounded shuffle for streamed data. It keeps at most `buffer_size` items
 ready and produces the same order again when given the same seed:
 
@@ -221,7 +228,7 @@ custom source cannot restore its cursor.
 - `map`
 - `parallel_map`
 - `prefetch`
-- bounded `shuffle`
+- global indexed and bounded stream `shuffle`
 - `filter`
 - `flat_map`
 - `take` and `skip`
