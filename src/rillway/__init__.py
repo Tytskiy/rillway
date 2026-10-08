@@ -6,6 +6,7 @@ from .dataset import (
     IndexedSource,
     RangeDataset,
 )
+from .profiling import Profile, ProfileNode, ProfileReport, profiling
 from .readers import (
     CsvDataset,
     HuggingFaceDataset,
@@ -28,7 +29,11 @@ __all__ = [
     "JsonValue",
     "JsonlDataset",
     "ParquetDataset",
+    "Profile",
+    "ProfileNode",
+    "ProfileReport",
     "RangeDataset",
     "State",
     "Unknown",
+    "profiling",
 ]

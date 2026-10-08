@@ -124,6 +124,25 @@ You can inspect a pipeline without running it:
 print(dataset.map(str).filter(str.isdigit).explain())
 ```
 
+Profile one execution when you need to find a slow operation:
+
+```python
+import rillway
+
+with rillway.profiling(dataset) as profile:
+    for item in dataset:
+        consume(item)
+
+print(profile)
+```
+
+The report shows output counts, time spent in the operation itself, and the
+average and maximum time to produce one value for every stage.
+Profiling is active only inside this context; ordinary pipeline execution has
+no per-item profiling checks.
+For asynchronous stages such as `prefetch` and `parallel_map`, self time is the
+time the consumer spends inside that stage, and timings may overlap.
+
 Independent work can run concurrently with `parallel_map`. Results stay in
 input order, and the amount of work waiting in memory is bounded.
 

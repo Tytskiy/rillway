@@ -17,6 +17,7 @@ Rillway is a typed Python library for immutable, replayable dataset pipelines.
 - `src/rillway/dataset.py` contains the public dataset types and core source nodes.
 - `src/rillway/cardinality.py` contains cardinality types and calculations.
 - `src/rillway/cursor.py` contains cursor lifecycle and shared checkpoint behavior.
+- `src/rillway/profiling.py` contains opt-in pipeline execution profiling.
 - `src/rillway/_ops/` groups private operation plans and cursors by behavior.
 - `src/rillway/readers/` contains structured-data source implementations.
 - `tests/` mirrors observable behavior of the public `rillway` API.
