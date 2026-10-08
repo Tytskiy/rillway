@@ -10,7 +10,7 @@ from typing import Any
 from ..cardinality import Cardinality
 from ..cursor import Cursor, State
 from ..dataset import Dataset
-from .queue import _QueueClosed, _ThreadingQueue
+from ..utils.queue import _QueueClosed, _ThreadingQueue
 
 _READ_AHEAD_SNAPSHOT_INTERVAL = 64
 
