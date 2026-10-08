@@ -17,7 +17,7 @@ from weakref import finalize
 from ._queue import _QueueClosed, _ThreadingQueue
 
 if TYPE_CHECKING:
-    from .dataset import Dataset, IndexedDataset, _RepeatDataset
+    from .dataset import Dataset, IndexedDataset, _MixDataset, _RepeatDataset
 
 type State = dict[str, Any]
 type _CheckpointKey = str | int | bool | tuple[_CheckpointKey, ...]
@@ -919,6 +919,56 @@ class InterleaveCursor[T](Cursor[T]):
         for cursor, parent_state in zip(self._cursors, parents, strict=True):
             cursor._restore(parent_state)
         self._component = component
+        self._active = active
+        self._remaining = sum(active)
+
+
+class MixCursor[T](Cursor[T]):
+    def __init__(self, dataset: _MixDataset[T]):
+        super().__init__(dataset)
+        self._mix_dataset = dataset
+        self._cursors = tuple(
+            self.enter_context(component.cursor()) for component in dataset.components
+        )
+        self._active = [True] * len(self._cursors)
+        self._remaining = len(self._cursors)
+        self._draw = 0
+
+    def _next(self) -> T:
+        while self._remaining:
+            component = self._mix_dataset._select(self._active, self._draw)
+            self._draw += 1
+            try:
+                return next(self._cursors[component])
+            except StopIteration:
+                self._active[component] = False
+                self._remaining -= 1
+        raise StopIteration
+
+    def _snapshot(self) -> State:
+        return {
+            "draw": self._draw,
+            "active": list(self._active),
+            "parents": [cursor._snapshot() for cursor in self._cursors],
+        }
+
+    def _restore(self, state: State) -> None:
+        try:
+            draw = to_index(state["draw"])
+            active = list(state["active"])
+            parents = list(state["parents"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("invalid mix checkpoint") from error
+        if (
+            draw < 0
+            or len(active) != len(self._cursors)
+            or any(type(value) is not bool for value in active)
+            or len(parents) != len(self._cursors)
+        ):
+            raise ValueError("mix checkpoint has invalid state")
+        for cursor, parent_state in zip(self._cursors, parents, strict=True):
+            cursor._restore(parent_state)
+        self._draw = draw
         self._active = active
         self._remaining = sum(active)
 

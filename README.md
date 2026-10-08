@@ -144,6 +144,18 @@ number of items already consumed rather than with the buffer size.
 items, and streamed datasets can be split into round-robin shards. Range-based
 datasets keep their contiguous, storage-friendly shards.
 
+`mix` chooses between datasets using deterministic weights. Finite inputs are
+all drained, so weights affect their order rather than their final counts. Use
+endless repetition when the weights should control a fixed-size training mix:
+
+```python
+training = (
+    text.repeat(None)
+    .mix(code.repeat(None), weights=(0.8, 0.2), seed=42)
+    .take(1_000_000)
+)
+```
+
 ## Resuming work
 
 Some datasets can save their current position and continue with a new cursor.
@@ -186,7 +198,7 @@ custom source cannot restore its cursor.
 - `take` and `skip`
 - `batch` and `unbatch`
 - `repeat`, with deterministic shuffling for indexed datasets
-- `concat` and `interleave`
+- `concat`, `interleave`, and weighted `mix`
 - `zip`
 - `shard` for streamed and range-based datasets
 - indexing and slicing for indexed datasets

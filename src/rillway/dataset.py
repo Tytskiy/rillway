@@ -12,6 +12,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import accumulate
+from math import isfinite
 from operator import index as to_index
 from typing import Any, ClassVar, Literal, Protocol, cast, overload, runtime_checkable
 
@@ -140,6 +141,14 @@ class Dataset[T](ABC):
         if not others:
             return self
         return _InterleaveDataset((self, *others))
+
+    def mix(
+        self,
+        *others: Dataset[T],
+        weights: Iterable[float],
+        seed: int = 42,
+    ) -> Dataset[T]:
+        return _mix_datasets(self, others, weights, seed)
 
     def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
         return _zip_datasets(self, other, strict)
@@ -855,6 +864,50 @@ class _InterleaveDataset[T](Dataset[T]):
 
 
 @dataclass(frozen=True, slots=True)
+class _MixDataset[T](Dataset[T]):
+    components: tuple[Dataset[T], ...]
+    weights: tuple[float, ...]
+    seed: int
+
+    @property
+    def parents(self) -> tuple[Dataset[Any], ...]:
+        return self.components
+
+    @property
+    def cardinality(self) -> Cardinality:
+        return _sum_cardinality(self.components)
+
+    @property
+    def description(self) -> str:
+        return f"Mix(weights={self.weights!r}, seed={self.seed})"
+
+    def cursor(self) -> Cursor[T]:
+        return cursors.MixCursor(self)
+
+    def _select(self, active: list[bool], draw: int) -> int:
+        total = sum(
+            weight
+            for weight, is_active in zip(self.weights, active, strict=True)
+            if is_active
+        )
+        random = _mix64((self.seed & _UINT64_MASK) ^ _mix64(draw)) >> 11
+        target = random * (2.0**-53) * total
+        cumulative = 0.0
+        selected = -1
+        for index, (weight, is_active) in enumerate(
+            zip(self.weights, active, strict=True)
+        ):
+            if not is_active:
+                continue
+            selected = index
+            cumulative += weight
+            if target < cumulative:
+                return index
+        assert selected >= 0
+        return selected
+
+
+@dataclass(frozen=True, slots=True)
 class _ZipIndexed[T, U](IndexedDataset[tuple[T, U]]):
     left: IndexedDataset[T]
     right: IndexedDataset[U]
@@ -944,6 +997,29 @@ def _concat_datasets[T](first: Dataset[T], others: tuple[Dataset[T], ...]) -> Da
 
 def _component_ends[T](components: tuple[RangeDataset[T], ...]) -> tuple[int, ...]:
     return tuple(accumulate(map(len, components)))
+
+
+def _mix_datasets[T](
+    first: Dataset[T],
+    others: tuple[Dataset[T], ...],
+    weights: Iterable[float],
+    seed: int,
+) -> Dataset[T]:
+    try:
+        normalized_weights = tuple(float(weight) for weight in weights)
+    except (TypeError, ValueError) as error:
+        raise TypeError("weights must be an iterable of numbers") from error
+    components = (first, *others)
+    if len(normalized_weights) != len(components):
+        raise ValueError("weights must contain one value per dataset")
+    if any(weight <= 0 or not isfinite(weight) for weight in normalized_weights):
+        raise ValueError("weights must contain only positive finite values")
+    if not isfinite(sum(normalized_weights)):
+        raise ValueError("weight sum must be finite")
+    seed = to_index(seed)
+    if not others:
+        return first
+    return _MixDataset(components, normalized_weights, seed)
 
 
 def _zip_datasets[T, U](

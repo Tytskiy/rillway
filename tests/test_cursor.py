@@ -379,6 +379,21 @@ def test_interleave_checkpoint_preserves_each_parent_position():
     assert list(resumed) == expected == [30]
 
 
+def test_mix_checkpoint_preserves_selection_and_parent_positions():
+    left = IndexedDataset.from_source(range(10)).filter(lambda value: True)
+    right = IndexedDataset.from_source(range(100, 105)).filter(lambda value: True)
+    dataset = left.mix(right, weights=(3, 1), seed=7)
+    cursor = dataset.cursor()
+    assert len([next(cursor) for _ in range(8)]) == 8
+    state = cursor.state_dict()
+    expected = list(cursor)
+
+    assert set(state["state"]) == {"draw", "active", "parents"}
+    resumed = dataset.cursor()
+    resumed.load_state_dict(state)
+    assert list(resumed) == expected
+
+
 def test_stream_shard_and_unbatch_resume_from_consumer_progress():
     source = IndexedDataset.from_source(range(12)).filter(lambda value: True)
     datasets = [

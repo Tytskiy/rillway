@@ -229,6 +229,36 @@ def test_interleave_uses_round_robin_and_keeps_remaining_items():
     assert left.interleave() is left
 
 
+def test_mix_is_weighted_reproducible_and_keeps_remaining_items():
+    left = IndexedDataset.from_source([("left", index) for index in range(40)])
+    right = IndexedDataset.from_source([("right", index) for index in range(10)])
+    mixed = left.mix(right, weights=(4, 1), seed=7)
+
+    result = list(mixed)
+    assert sorted(result) == sorted([*left, *right])
+    assert result == list(left.mix(right, weights=(4, 1), seed=7))
+    assert result != list(left.mix(right, weights=(4, 1), seed=8))
+    assert sum(source == "left" for source, _ in result[:25]) > 15
+    assert mixed.cardinality == Exact(50)
+    assert mixed.explain().startswith("Mix(weights=(4.0, 1.0), seed=7)")
+
+
+@pytest.mark.parametrize(
+    "weights, error",
+    [
+        ((1,), "one value per dataset"),
+        ((1, 0), "positive finite"),
+        ((1, float("inf")), "positive finite"),
+    ],
+)
+def test_mix_validates_weights(weights, error):
+    left = IndexedDataset.from_source([1])
+    right = IndexedDataset.from_source([2])
+
+    with pytest.raises(ValueError, match=error):
+        left.mix(right, weights=weights)
+
+
 def test_stream_shard_selects_round_robin_partitions():
     source = Dataset.from_factory(lambda: iter(range(10)), cardinality=Exact(10))
     shards = [source.shard(index, 3) for index in range(3)]
