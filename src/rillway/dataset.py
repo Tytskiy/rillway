@@ -38,7 +38,7 @@ class Dataset[T](ABC):
     stateful processing in a custom Cursor so its state can be checkpointed.
     """
 
-    supports_checkpointing: ClassVar[bool] = False
+    supports_checkpointing: ClassVar[bool] = True
 
     @property
     def parents(self) -> tuple[Dataset[Any], ...]:
@@ -254,8 +254,6 @@ class IndexedDataset[T](RangeDataset[T], ABC):
     fixed configuration. Stateful processing belongs in a custom Cursor.
     """
 
-    supports_checkpointing = True
-
     @abstractmethod
     def _get(self, position: int) -> T: ...
 
@@ -430,8 +428,6 @@ class _SliceIndexed[T](IndexedDataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _RangeSlice[T](RangeDataset[T]):
-    supports_checkpointing = True
-
     parent: RangeDataset[T]
     start: int
     stop: int
@@ -458,8 +454,6 @@ class _RangeSlice[T](RangeDataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _RepeatRange[T](RangeDataset[T]):
-    supports_checkpointing = True
-
     parent: RangeDataset[T]
     count: int
 
@@ -540,8 +534,6 @@ class _ShuffledEpochIndexed[T](IndexedDataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _UnaryRange[T, U](_UnaryNode[T], RangeDataset[U]):
-    supports_checkpointing = True
-
     parent: RangeDataset[T]
     operation: _ExactOperation[T, U]
 
@@ -559,13 +551,8 @@ class _UnaryRange[T, U](_UnaryNode[T], RangeDataset[U]):
 
 @dataclass(frozen=True, slots=True)
 class _ConcatRange[T](RangeDataset[T]):
-    supports_checkpointing = True
-
     components: tuple[RangeDataset[T], ...]
-    _ends: tuple[int, ...] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "_ends", tuple(accumulate(map(len, self.components))))
+    _ends: tuple[int, ...] = field(repr=False)
 
     @property
     def parents(self) -> tuple[Dataset[Any], ...]:
@@ -604,8 +591,6 @@ class _ConcatRange[T](RangeDataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _ZipRange[T, U](RangeDataset[tuple[T, U]]):
-    supports_checkpointing = True
-
     left: RangeDataset[T]
     right: RangeDataset[U]
     strict: bool
@@ -650,8 +635,6 @@ class _UnaryIndexed[T, U](_UnaryNode[T], IndexedDataset[U]):
 
 @dataclass(frozen=True, slots=True)
 class _UnaryDataset[T, U](_UnaryNode[T], Dataset[U]):
-    supports_checkpointing = True
-
     parent: Dataset[T]
     operation: _StreamOperation[T, U]
 
@@ -665,8 +648,6 @@ class _UnaryDataset[T, U](_UnaryNode[T], Dataset[U]):
 
 @dataclass(frozen=True, slots=True)
 class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
-    supports_checkpointing = True
-
     parent: Dataset[T]
     operation: _ParallelMap[T, U]
 
@@ -680,8 +661,6 @@ class _ParallelMapDataset[T, U](_UnaryNode[T], Dataset[U]):
 
 @dataclass(frozen=True, slots=True)
 class _PrefetchDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
     parent: Dataset[T]
     buffer_size: int
 
@@ -703,8 +682,6 @@ class _PrefetchDataset[T](Dataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _ShuffleDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
     parent: Dataset[T]
     buffer_size: int
     seed: int
@@ -732,8 +709,6 @@ class _ShuffleDataset[T](Dataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _ShardDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
     parent: Dataset[T]
     index: int
     count: int
@@ -769,8 +744,6 @@ class _ShardDataset[T](Dataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _RepeatDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
     parent: Dataset[T]
     count: int | None
     shuffled: bool
@@ -800,6 +773,8 @@ class _RepeatDataset[T](Dataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _FactoryDataset[T](Dataset[T]):
+    supports_checkpointing: ClassVar[bool] = False
+
     factory: Callable[[], Iterable[T]]
     _cardinality: Cardinality
     name: str
@@ -819,10 +794,7 @@ class _FactoryDataset[T](Dataset[T]):
 @dataclass(frozen=True, slots=True)
 class _ConcatIndexed[T](IndexedDataset[T]):
     components: tuple[IndexedDataset[T], ...]
-    _ends: tuple[int, ...] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "_ends", tuple(accumulate(map(len, self.components))))
+    _ends: tuple[int, ...] = field(repr=False)
 
     @property
     def parents(self) -> tuple[Dataset[Any], ...]:
@@ -844,8 +816,6 @@ class _ConcatIndexed[T](IndexedDataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _ConcatDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
     components: tuple[Dataset[T], ...]
 
     @property
@@ -866,8 +836,6 @@ class _ConcatDataset[T](Dataset[T]):
 
 @dataclass(frozen=True, slots=True)
 class _InterleaveDataset[T](Dataset[T]):
-    supports_checkpointing = True
-
     components: tuple[Dataset[T], ...]
 
     @property
@@ -910,8 +878,6 @@ class _ZipIndexed[T, U](IndexedDataset[tuple[T, U]]):
 
 @dataclass(frozen=True, slots=True)
 class _ZipDataset[T, U](Dataset[tuple[T, U]]):
-    supports_checkpointing = True
-
     left: Dataset[T]
     right: Dataset[U]
     strict: bool
@@ -968,10 +934,16 @@ def _concat_datasets[T](first: Dataset[T], others: tuple[Dataset[T], ...]) -> Da
         return first
     components = (first, *others)
     if all(isinstance(component, IndexedDataset) for component in components):
-        return _ConcatIndexed(cast(tuple[IndexedDataset[T], ...], components))
+        indexed = cast(tuple[IndexedDataset[T], ...], components)
+        return _ConcatIndexed(indexed, _component_ends(indexed))
     if all(isinstance(component, RangeDataset) for component in components):
-        return _ConcatRange(cast(tuple[RangeDataset[T], ...], components))
+        ranged = cast(tuple[RangeDataset[T], ...], components)
+        return _ConcatRange(ranged, _component_ends(ranged))
     return _ConcatDataset(components)
+
+
+def _component_ends[T](components: tuple[RangeDataset[T], ...]) -> tuple[int, ...]:
+    return tuple(accumulate(map(len, components)))
 
 
 def _zip_datasets[T, U](

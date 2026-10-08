@@ -17,14 +17,12 @@ from .dataset import Dataset
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(init=False)
 class JsonlDataset(Dataset[JsonValue]):
-    supports_checkpointing = True
-
     path: str
 
     def __init__(self, path: str | PathLike[str]):
-        object.__setattr__(self, "path", str(Path(path).absolute()))
+        self.path = str(Path(path).absolute())
 
     @property
     def cardinality(self) -> Cardinality:

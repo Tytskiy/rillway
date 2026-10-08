@@ -16,10 +16,8 @@ from .cursor import Cursor, State
 from .dataset import Dataset
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(init=False)
 class CsvDataset(Dataset[dict[str, str]]):
-    supports_checkpointing = True
-
     path: str
     delimiter: str
     columns: tuple[str, ...] | None
@@ -51,10 +49,10 @@ class CsvDataset(Dataset[dict[str, str]]):
             raise TypeError("encoding must be a string")
         if not encoding:
             raise ValueError("encoding must not be empty")
-        object.__setattr__(self, "path", str(Path(path).absolute()))
-        object.__setattr__(self, "delimiter", delimiter)
-        object.__setattr__(self, "columns", normalized_columns)
-        object.__setattr__(self, "encoding", encoding)
+        self.path = str(Path(path).absolute())
+        self.delimiter = delimiter
+        self.columns = normalized_columns
+        self.encoding = encoding
 
     @property
     def cardinality(self) -> Cardinality:

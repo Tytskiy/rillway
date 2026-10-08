@@ -435,8 +435,6 @@ def test_custom_dataset_and_cursor_define_a_checkpointable_source():
             self.position = state["position"]
 
     class CounterDataset(Dataset[int]):
-        supports_checkpointing = True
-
         def __init__(self, stop):
             self.stop = stop
 

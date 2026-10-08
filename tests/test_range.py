@@ -3,7 +3,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from operator import index as to_index
-from typing import ClassVar
 
 import pytest
 
@@ -35,8 +34,6 @@ class PositionCursor(Cursor[int]):
 
 
 class RecordingRange(RangeDataset[int]):
-    supports_checkpointing = True
-
     def __init__(self, length: int):
         self.length = length
         self.opens: list[tuple[int, int]] = []
@@ -143,8 +140,6 @@ class HDFSCursor(Cursor[int]):
 
 @dataclass(frozen=True, slots=True)
 class HDFSDataset(RangeDataset[int]):
-    supports_checkpointing: ClassVar[bool] = True
-
     client: FakeHDFS
     path: str
     version: str

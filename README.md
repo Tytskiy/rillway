@@ -171,7 +171,9 @@ match.
 Implement a custom checkpointable source as a `Dataset` and `Cursor` pair. The
 dataset owns immutable configuration and returns a fresh stateful cursor for
 each traversal. The cursor implements `_snapshot()` and `_restore()` for its
-own state; Rillway adds and validates the public checkpoint envelope.
+own state; Rillway adds and validates the public checkpoint envelope. Datasets
+are checkpointable by default; set `supports_checkpointing = False` when a
+custom source cannot restore its cursor.
 
 ## Available operations
 

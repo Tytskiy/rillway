@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from os import PathLike
 from pathlib import Path
-from typing import Any, BinaryIO, ClassVar, cast
+from typing import Any, BinaryIO, cast
 
 from ._file import (
     _FileIdentity,
@@ -29,10 +29,8 @@ def _pyarrow_parquet() -> Any:
         raise
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(init=False)
 class ParquetDataset(RangeDataset[dict[str, object]]):
-    supports_checkpointing: ClassVar[bool] = True
-
     path: str
     columns: tuple[str, ...] | None
     _length: int
@@ -71,11 +69,11 @@ class ParquetDataset(RangeDataset[dict[str, object]]):
             finally:
                 parquet_file.close()
 
-        object.__setattr__(self, "path", normalized_path)
-        object.__setattr__(self, "columns", normalized_columns)
-        object.__setattr__(self, "_length", length)
-        object.__setattr__(self, "_row_groups", row_groups)
-        object.__setattr__(self, "_identity", identity)
+        self.path = normalized_path
+        self.columns = normalized_columns
+        self._length = length
+        self._row_groups = row_groups
+        self._identity = identity
 
     @property
     def cardinality(self) -> Exact:

@@ -23,6 +23,8 @@ Rillway is a typed Python library for immutable, replayable dataset pipelines.
 
 - Use PEP 695 generics instead of `TypeVar`.
 - Use dataclasses for data and plain classes for bases with no fields.
+- Prefer frozen dataclasses for dataset plan nodes. Use mutable dataclasses when
+  freezing would require mutation bypasses such as `object.__setattr__`.
 - Use `ClassVar` for class-level constants on dataclasses.
 - Add `from __future__ import annotations` only when forward references require it.
 - Do not add comments or docstrings that merely narrate clear code. Explain only
@@ -49,7 +51,9 @@ Rillway is a typed Python library for immutable, replayable dataset pipelines.
 ## Design constraints
 
 - Enforce contracts and boundaries in code while keeping execution strategy flexible.
-- Keep dataset graphs immutable and replayable; cursors are stateful and one-shot.
+- Keep dataset APIs immutable and replayable: operations return new dataset
+  graphs, and library code does not mutate existing graphs. Frozen dataclasses
+  are a guardrail, not the contract; user mutation while a cursor is active is unsupported.
 - Preserve additional access capabilities only when an operation can support them; otherwise return a `Dataset`.
 - Keep cardinality propagation accurate without traversing input data.
 - Ensure cursor exhaustion, failure, explicit close, and abandonment release owned resources.
