@@ -128,6 +128,23 @@ class Dataset[T](ABC):
 
         return _UnaryDataset(self, _Batch(_positive("size", size), drop_last))
 
+    def batch_by_size(
+        self,
+        max_size: int,
+        *,
+        size: Callable[[T], int],
+    ) -> Dataset[tuple[T, ...]]:
+        from ._ops.transforms import _BatchBySize, _UnaryDataset
+
+        return _UnaryDataset(
+            self,
+            _BatchBySize(
+                _positive("max_size", max_size),
+                size,
+                _callable_name(size, None),
+            ),
+        )
+
     def unbatch[U](self: Dataset[Iterable[U]]) -> Dataset[U]:
         from ._ops.transforms import _UnaryDataset, _Unbatch
 

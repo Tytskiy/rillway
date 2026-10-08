@@ -118,6 +118,16 @@ Rillway keeps useful abilities when an operation allows it. Mapping an indexed
 dataset still gives you an indexed dataset. Filtering may change how many
 items remain, so its result behaves like a stream instead.
 
+Variable-length records can be grouped by a shared budget. For example, this
+keeps the total number of tokens in each tuple at or below 8,192:
+
+```python
+batches = documents.batch_by_size(
+    8_192,
+    size=lambda document: len(document["tokens"]),
+)
+```
+
 You can inspect a pipeline without running it:
 
 ```python

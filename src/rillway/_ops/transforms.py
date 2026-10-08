@@ -3,8 +3,15 @@ from dataclasses import dataclass
 from operator import index as to_index
 from typing import Any, Protocol, runtime_checkable
 
+from .._read_ahead import _ReadAheadCheckpoint
 from ..cardinality import Bounds, Cardinality, Exact, Infinite, Unknown
-from ..cursor import Cursor, State, TransformCursor, _CloseSlot, _ParentCursor
+from ..cursor import (
+    Cursor,
+    State,
+    TransformCursor,
+    _CloseSlot,
+    _ParentCursor,
+)
 from ..dataset import Dataset, IndexedDataset, RangeDataset
 
 
@@ -263,6 +270,34 @@ class _Batch[T]:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _BatchBySize[T]:
+    max_size: int
+    size: Callable[[T], int]
+    name: str
+
+    @property
+    def description(self) -> str:
+        return f"BatchBySize(max_size={self.max_size}, size={self.name!r})"
+
+    def cardinality(self, parent: Cardinality) -> Cardinality:
+        if isinstance(parent, Exact):
+            if parent == 0:
+                return Exact(0)
+            return Bounds((parent + self.max_size - 1) // self.max_size, parent)
+        if isinstance(parent, Bounds):
+            lower = (parent.lower + self.max_size - 1) // self.max_size
+            return Bounds(lower, parent.upper)
+        return parent
+
+    def open(
+        self,
+        dataset: Dataset[tuple[T, ...]],
+        parent: Cursor[T],
+    ) -> Cursor[tuple[T, ...]]:
+        return _BatchBySizeCursor(dataset, parent, self.max_size, self.size)
+
+
 class _FlatMapCursor[T, U](_ParentCursor[T, U]):
     def __init__(
         self,
@@ -409,3 +444,79 @@ class _BatchCursor[T](_ParentCursor[T, tuple[T, ...]]):
         if len(buffer) >= self._size:
             raise ValueError("batch checkpoint has an invalid buffer")
         self._buffer = buffer
+
+
+class _BatchBySizeCursor[T](Cursor[tuple[T, ...]]):
+    def __init__(
+        self,
+        dataset: Dataset[tuple[T, ...]],
+        parent: Cursor[T],
+        max_size: int,
+        size: Callable[[T], int],
+    ):
+        super().__init__(dataset)
+        self._parent = self.enter_context(parent)
+        self._max_size = max_size
+        self._size = size
+        self._pending: tuple[T, int] | None = None
+        self._checkpoint = _ReadAheadCheckpoint(parent) if parent.checkpointable else None
+
+    @property
+    def checkpointable(self) -> bool:
+        return self._checkpoint is not None
+
+    def _next(self) -> tuple[T, ...]:
+        batch: list[T] = []
+        total = 0
+        while True:
+            if self._pending is None:
+                try:
+                    value = next(self._parent)
+                except StopIteration:
+                    if not batch:
+                        raise
+                    return self._emit(batch, exhausted=True)
+                if self._checkpoint is not None:
+                    self._checkpoint.produced()
+                item_size = self._item_size(value)
+            else:
+                value, item_size = self._pending
+                self._pending = None
+
+            if batch and total + item_size > self._max_size:
+                self._pending = value, item_size
+                return self._emit(batch)
+
+            batch.append(value)
+            total += item_size
+            if total == self._max_size:
+                return self._emit(batch)
+
+    def _item_size(self, value: T) -> int:
+        try:
+            size = to_index(self._size(value))
+        except TypeError as error:
+            raise TypeError("size must return an integer") from error
+        if size < 1:
+            raise ValueError("size must return a positive integer")
+        if size > self._max_size:
+            raise ValueError(f"item size {size} exceeds max_size {self._max_size}")
+        return size
+
+    def _emit(self, batch: list[T], *, exhausted: bool = False) -> tuple[T, ...]:
+        if self._checkpoint is not None:
+            self._checkpoint.consumed(len(batch))
+        result = tuple(batch)
+        if exhausted:
+            self.close()
+        return result
+
+    def _snapshot(self) -> State:
+        if self._checkpoint is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        return self._checkpoint.snapshot()
+
+    def _restore(self, state: State) -> None:
+        if self._checkpoint is None:
+            raise TypeError(f"{type(self).__name__} is not checkpointable")
+        self._checkpoint.restore(state)
