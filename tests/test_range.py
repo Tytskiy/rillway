@@ -326,7 +326,7 @@ def test_concat_opens_only_overlapping_component_ranges():
     left = RecordingRange(4)
     middle = RecordingRange(5)
     right = RecordingRange(3)
-    dataset = left.concat(middle, right)
+    dataset = Dataset.concat(left, middle, right)
 
     assert isinstance(dataset, RangeDataset)
     assert dataset.cardinality == Exact(12)
@@ -339,7 +339,7 @@ def test_concat_opens_only_overlapping_component_ranges():
 def test_zip_and_shard_open_the_same_range_on_both_parents():
     left = RecordingRange(10)
     right = RecordingRange(10)
-    dataset = left.zip(right).shard(1, 2)
+    dataset = Dataset.zip(left, right).shard(1, 2)
 
     assert isinstance(dataset, RangeDataset)
     assert list(dataset) == [(5, 5), (6, 6), (7, 7), (8, 8), (9, 9)]
@@ -351,8 +351,8 @@ def test_concat_and_zip_lose_range_access_when_a_parent_is_streamed():
     source = RecordingRange(4)
     stream = source.filter(lambda value: True)
 
-    concatenated = source.concat(stream)
-    zipped = source.zip(stream)
+    concatenated = Dataset.concat(source, stream)
+    zipped = Dataset.zip(source, stream)
     assert isinstance(concatenated, Dataset)
     assert isinstance(zipped, Dataset)
     assert not isinstance(concatenated, (RangeDataset, IndexedDataset))
@@ -363,8 +363,8 @@ def test_mixed_indexed_and_range_composition_preserves_range_access():
     indexed = IndexedDataset.from_source([10, 11])
     ranged = RecordingRange(2)
 
-    concatenated = indexed.concat(ranged)
-    zipped = indexed.zip(ranged)
+    concatenated = Dataset.concat(indexed, ranged)
+    zipped = Dataset.zip(indexed, ranged)
 
     assert isinstance(concatenated, RangeDataset)
     assert not isinstance(concatenated, IndexedDataset)

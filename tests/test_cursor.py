@@ -190,8 +190,8 @@ def test_cursor_checkpointability_follows_ordinary_parent_graphs():
         uncheckpointable,
         uncheckpointable.take(1),
         uncheckpointable.repeat(2),
-        uncheckpointable.concat(checkpointable),
-        uncheckpointable.zip(checkpointable),
+        Dataset.concat(uncheckpointable, checkpointable),
+        Dataset.zip(uncheckpointable, checkpointable),
     ]
 
     assert checkpointable.cursor().checkpointable
@@ -350,7 +350,7 @@ def test_checkpoint_rejects_a_different_cursor_configuration():
         (source.take(4), source.take(5)),
         (source.skip(4), source.skip(5)),
         (source.batch(2), source.batch(3)),
-        (source.zip(source), source.zip(source, strict=True)),
+        (Dataset.zip(source, source), Dataset.zip(source, source, strict=True)),
     ]
 
     for original, different in datasets:

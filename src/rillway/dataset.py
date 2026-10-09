@@ -155,32 +155,99 @@ class Dataset[T](ABC):
 
         return _repeat_dataset(self, count)
 
-    def concat(self, *others: Dataset[T]) -> Dataset[T]:
+    @overload
+    @staticmethod
+    def concat[U](
+        first: IndexedDataset[U],
+        second: IndexedDataset[U],
+        *others: IndexedDataset[U],
+    ) -> IndexedDataset[U]: ...
+
+    @overload
+    @staticmethod
+    def concat[U](
+        first: RangeDataset[U],
+        second: RangeDataset[U],
+        *others: RangeDataset[U],
+    ) -> RangeDataset[U]: ...
+
+    @overload
+    @staticmethod
+    def concat[U](
+        first: Dataset[U],
+        second: Dataset[U],
+        *others: Dataset[U],
+    ) -> Dataset[U]: ...
+
+    @staticmethod
+    def concat[U](
+        first: Dataset[U],
+        second: Dataset[U],
+        *others: Dataset[U],
+    ) -> Dataset[U]:
         from ._ops.composition import _concat_datasets
 
-        return _concat_datasets(self, others)
+        return _concat_datasets(first, (second, *others))
 
-    def interleave(self, *others: Dataset[T]) -> Dataset[T]:
-        if not others:
-            return self
+    @staticmethod
+    def interleave[U](
+        first: Dataset[U],
+        second: Dataset[U],
+        *others: Dataset[U],
+    ) -> Dataset[U]:
         from ._ops.composition import _InterleaveDataset
 
-        return _InterleaveDataset((self, *others))
+        return _InterleaveDataset((first, second, *others))
 
-    def mix(
-        self,
-        *others: Dataset[T],
+    @staticmethod
+    def mix[U](
+        first: Dataset[U],
+        second: Dataset[U],
+        *others: Dataset[U],
         weights: Iterable[float],
         seed: int = 42,
-    ) -> Dataset[T]:
+    ) -> Dataset[U]:
         from ._ops.composition import _mix_datasets
 
-        return _mix_datasets(self, others, weights, seed)
+        return _mix_datasets(first, (second, *others), weights, seed)
 
-    def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
+    @overload
+    @staticmethod
+    def zip[U, V](
+        left: IndexedDataset[U],
+        right: IndexedDataset[V],
+        *,
+        strict: bool = False,
+    ) -> IndexedDataset[tuple[U, V]]: ...
+
+    @overload
+    @staticmethod
+    def zip[U, V](
+        left: RangeDataset[U],
+        right: RangeDataset[V],
+        *,
+        strict: bool = False,
+    ) -> RangeDataset[tuple[U, V]]: ...
+
+    @overload
+    @staticmethod
+    def zip[U, V](
+        left: Dataset[U],
+        right: Dataset[V],
+        *,
+        strict: bool = False,
+    ) -> Dataset[tuple[U, V]]: ...
+
+    @staticmethod
+    def zip[U, V](
+        left: Dataset[U],
+        right: Dataset[V],
+        *,
+        strict: bool = False,
+    ) -> Dataset[tuple[U, V]]:
         from ._ops.composition import _zip_datasets
 
-        return _zip_datasets(self, other, strict)
+        return _zip_datasets(left, right, strict)
 
     def shard(self, index: int, count: int) -> Dataset[T]:
         from ._ops.ordering import _ShardDataset
@@ -275,29 +342,6 @@ class RangeDataset[T](Dataset[T], ABC):
         from ._ops.ordering import _repeat_dataset
 
         return _repeat_dataset(self, count)
-
-    @overload
-    def concat(self, *others: RangeDataset[T]) -> RangeDataset[T]: ...
-
-    @overload
-    def concat(self, *others: Dataset[T]) -> Dataset[T]: ...
-
-    def concat(self, *others: Dataset[T]) -> Dataset[T]:
-        from ._ops.composition import _concat_datasets
-
-        return _concat_datasets(self, others)
-
-    @overload
-    def zip[U](self, other: RangeDataset[U], *, strict: bool = False) -> RangeDataset[tuple[T, U]]: ...
-
-    @overload
-    def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]: ...
-
-    def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
-        from ._ops.composition import _zip_datasets
-
-        return _zip_datasets(self, other, strict)
-
 
 class IndexedDataset[T](RangeDataset[T], ABC):
     """IndexedDataset transformations must be deterministic functions of their input and
@@ -410,43 +454,6 @@ class IndexedDataset[T](RangeDataset[T], ABC):
         from ._ops.ordering import _repeat_dataset
 
         return _repeat_dataset(self, count, shuffle=shuffle, seed=seed)
-
-    @overload  # type: ignore[override]
-    def concat(
-        self,
-        *others: IndexedDataset[T],
-    ) -> IndexedDataset[T]: ...
-
-    @overload
-    def concat(self, *others: RangeDataset[T]) -> RangeDataset[T]: ...
-
-    @overload
-    def concat(self, *others: Dataset[T]) -> Dataset[T]: ...
-
-    def concat(self, *others: Dataset[T]) -> Dataset[T]:
-        from ._ops.composition import _concat_datasets
-
-        return _concat_datasets(self, others)
-
-    @overload  # type: ignore[override]
-    def zip[U](
-        self,
-        other: IndexedDataset[U],
-        *,
-        strict: bool = False,
-    ) -> IndexedDataset[tuple[T, U]]: ...
-
-    @overload
-    def zip[U](self, other: RangeDataset[U], *, strict: bool = False) -> RangeDataset[tuple[T, U]]: ...
-
-    @overload
-    def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]: ...
-
-    def zip[U](self, other: Dataset[U], *, strict: bool = False) -> Dataset[tuple[T, U]]:
-        from ._ops.composition import _zip_datasets
-
-        return _zip_datasets(self, other, strict)
-
 
 @runtime_checkable
 class IndexedSource[T](Protocol):

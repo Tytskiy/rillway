@@ -205,20 +205,29 @@ Shuffle checkpoints keep only their starting position and output count.
 Restoring one replays the earlier shuffle work, so restore time grows with the
 number of items already consumed rather than with the buffer size.
 
-`interleave` reads datasets in round-robin order, `unbatch` flattens iterable
-items, and streamed datasets can be split into round-robin shards. Range-based
-datasets keep their contiguous, storage-friendly shards.
+Operations that combine datasets name every input explicitly:
+
+```python
+all_rows = Dataset.concat(first, second)
+round_robin = Dataset.interleave(first, second)
+paired = Dataset.zip(inputs, labels)
+```
+
+`unbatch` flattens iterable items, and streamed datasets can be split into
+round-robin shards. Range-based datasets keep their contiguous,
+storage-friendly shards.
 
 `mix` chooses between datasets using deterministic weights. Finite inputs are
 all drained, so weights affect their order rather than their final counts. Use
 endless repetition when the weights should control a fixed-size training mix:
 
 ```python
-training = (
-    text.repeat(None)
-    .mix(code.repeat(None), weights=(0.8, 0.2), seed=42)
-    .take(1_000_000)
-)
+training = Dataset.mix(
+    text.repeat(None),
+    code.repeat(None),
+    weights=(0.8, 0.2),
+    seed=42,
+).take(1_000_000)
 ```
 
 ## Resuming work
